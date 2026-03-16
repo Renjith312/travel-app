@@ -1,0 +1,57 @@
+.login-root {
+  display: flex; min-height: 100vh;
+}
+.login-left {
+  flex: 1; background: linear-gradient(135deg, #0f1117 0%, #161b27 50%, #1a1f35 100%);
+  display: flex; flex-direction: column; justify-content: space-between;
+  padding: 40px; position: relative; overflow: hidden;
+}
+.login-brand {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 20px; font-weight: 700; color: #e8eaf0; z-index: 1;
+}
+.login-hero { z-index: 1; }
+.login-hero h1 {
+  font-size: 42px; font-weight: 800; line-height: 1.2;
+  background: linear-gradient(135deg, #e8eaf0, #6c8eff);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  margin-bottom: 16px;
+}
+.login-hero p { color: #8b95b0; font-size: 16px; margin-bottom: 32px; max-width: 380px; }
+.login-features { display: flex; flex-direction: column; gap: 14px; }
+.feat { display: flex; align-items: center; gap: 12px; color: #8b95b0; font-size: 14px; }
+.feat svg { color: #6c8eff; flex-shrink: 0; }
+.orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.15; }
+.orb1 { width:400px; height:400px; background:#6c8eff; top:-100px; right:-100px; }
+.orb2 { width:300px; height:300px; background:#4f6ef7; bottom:-50px; left:-50px; }
+.orb3 { width:200px; height:200px; background:#34d399; bottom:100px; right:50px; }
+
+.login-right {
+  width: 480px; background: var(--bg); display: flex;
+  align-items: center; justify-content: center; padding: 40px;
+}
+.login-card { width: 100%; max-width: 380px; }
+.login-tabs {
+  display: flex; gap: 4px; background: var(--bg2); border-radius: 12px;
+  padding: 4px; margin-bottom: 28px;
+}
+.login-tabs button {
+  flex: 1; padding: 10px; border-radius: 9px; font-size: 14px;
+  color: var(--text2); background: transparent; font-weight: 500;
+}
+.login-tabs button.active { background: var(--bg3); color: var(--text); }
+.login-form { display: flex; flex-direction: column; gap: 16px; }
+.name-row { display: flex; gap: 12px; }
+.name-row .field { flex: 1; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 13px; color: var(--text2); font-weight: 500; }
+.login-btn { width: 100%; padding: 13px; font-size: 15px; margin-top: 4px; }
+.login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.login-error {
+  background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.3);
+  color: var(--red); padding: 10px 14px; border-radius: 10px; font-size: 13px;
+}
+@media (max-width: 768px) {
+  .login-left { display: none; }
+  .login-right { width: 100%; }
+}

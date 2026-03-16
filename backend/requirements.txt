@@ -1,0 +1,17 @@
+flask
+flask-cors
+python-dotenv
+bcrypt
+pyjwt
+sqlalchemy
+psycopg2-binary
+pydantic>=2.5.2
+requests
+numpy
+scikit-learn
+networkx
+tenacity
+google-auth>=2.47.0
+google-auth-oauthlib
+langgraph
+langchain-core
