@@ -29,6 +29,7 @@ build/
 # ── Environment files ──────────────────────────────────────
 .env
 .env.*
+Backend/.env
 !.env.example
 
 # ── Database / GraphML ─────────────────────────────────────
