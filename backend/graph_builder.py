@@ -21,15 +21,25 @@ from database_models import (
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-ORS_API_KEY    = os.getenv("OPENROUTESERVICE_API_KEY", "")
+ORS_API_KEY        = os.getenv("OPENROUTESERVICE_API_KEY", "")
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL       = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
 ORS_MATRIX_URL = "https://api.openrouteservice.org/v2/matrix/driving-car"
-OVERPASS_API   = "https://overpass-api.de/api/interpreter"
+# Multiple Overpass mirrors — tried in order, first success wins
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
 NOMINATIM_URL  = "https://nominatim.openstreetmap.org/search"
 
 K_NEIGHBORS    = 5
 MAX_TRAVEL_MIN = 90
-MAX_PLACES     = 40
-RADIUS_M       = 15000
+MAX_PLACES     = 50
+RADIUS_M       = 40000
 PROXIMITY_M    = 500
 
 _CAT_MAP = {
@@ -81,6 +91,167 @@ def _elapsed(t0): return f"{time.time()-t0:.1f}s"
 
 
 # ── Step 1: Geocode ────────────────────────────────────────────────────────────
+# Mirrors that have already failed this process run — skip them immediately
+_dead_mirrors: set = set()
+
+def _overpass_post(query: str, timeout: int = 12):
+    """POST an Overpass query, trying each mirror until one succeeds.
+    Dead mirrors (failed earlier this run) are skipped instantly.
+    """
+    last_err = None
+    for mirror in OVERPASS_MIRRORS:
+        if mirror in _dead_mirrors:
+            continue
+        try:
+            r = requests.post(mirror, data={"data": query}, timeout=timeout)
+            if r.status_code == 429:
+                _warn(f"429 on {mirror} — marking dead, trying next mirror")
+                _dead_mirrors.add(mirror)
+                continue
+            if r.status_code in (502, 503, 504):
+                _warn(f"HTTP {r.status_code} on {mirror} — marking dead, trying next mirror")
+                _dead_mirrors.add(mirror)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            _dead_mirrors.add(mirror)
+            _warn(f"{mirror} failed: {type(e).__name__} — marking dead, trying next mirror")
+    _warn(f"All Overpass mirrors exhausted.")
+    return None
+
+
+def _robust_json_parse(text: str):
+    """Parse JSON from LLM output tolerating fences, trailing commas, comments."""
+    import json as _j, ast as _a
+    t = text.strip()
+    # Remove markdown fences
+    fence = "```"
+    if t.startswith(fence):
+        t = t[t.find("\n")+1:] if "\n" in t else t[3:]
+    if t.endswith(fence):
+        t = t[:t.rfind(fence)]
+    t = t.strip()
+    # Extract first [...] or {...} block
+    for open_ch, close_ch in (("[", "]"), ("{", "}")):
+        start = t.find(open_ch)
+        if start == -1:
+            continue
+        depth, in_str, esc, end = 0, False, False, -1
+        for i, ch in enumerate(t[start:], start):
+            if esc: esc = False; continue
+            if ch == "\\": esc = True; continue
+            if ch == '"' and not esc: in_str = not in_str
+            if in_str: continue
+            if ch == open_ch: depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0: end = i; break
+        if end != -1:
+            t = t[start:end + 1]
+            break
+    # Remove // comments and trailing commas
+    t = re.sub(r"//[^\n]*", "", t)
+    t = re.sub(r",\s*([\]}])", r"\1", t)
+    try:
+        return _j.loads(t)
+    except Exception:
+        pass
+    try:
+        return _a.literal_eval(t)
+    except Exception:
+        return None
+
+
+def _llm_places_fallback(destination: str, lat: float, lon: float) -> list:
+    """
+    Ask Gemini (then OpenRouter) for tourist places when all Overpass mirrors fail.
+    Returns places in the same dict format as _fetch_osm().
+    """
+    import json as _json
+    prompt = (
+        f"You are a travel data API. Return ONLY a valid JSON array — "
+        f"no markdown fences, no comments, no trailing commas, no extra text. "
+        f"List 25 top tourist attractions in {destination}, India. "
+        f"Each element must have exactly these keys: "
+        f'"name" (string), "category" (one of: attraction/museum/viewpoint/beach/fort/'
+        f"nature/park/waterfall/market/historic), "
+        f'"latitude" (number), "longitude" (number). '
+        f"Use accurate GPS coordinates near ({lat:.4f}, {lon:.4f}). "
+        f"Start your response with [ and end with ]. No other text."
+    )
+
+    raw_text = None
+
+    if GEMINI_API_KEY:
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048}},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                raw_text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                print(f"  → LLM fallback: got response from Gemini")
+        except Exception as e:
+            _warn(f"Gemini LLM fallback error: {e}")
+
+    if not raw_text and OPENROUTER_API_KEY:
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": OPENROUTER_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0.2, "max_tokens": 2048},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                raw_text = r.json()["choices"][0]["message"]["content"]
+                print(f"  → LLM fallback: got response from OpenRouter")
+        except Exception as e:
+            _warn(f"OpenRouter LLM fallback error: {e}")
+
+    if not raw_text:
+        _warn("LLM fallback: no response from any LLM")
+        return []
+
+    data = _robust_json_parse(raw_text)
+    if data is None:
+        _warn("LLM fallback: could not parse JSON from response")
+        _warn(f"  Raw text preview: {raw_text[:300]!r}")
+        return []
+
+    if not isinstance(data, list):
+        _warn("LLM fallback: response is not a list")
+        return []
+
+    places = []
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        name = str(item["name"]).strip()
+        norm = re.sub(r"[^a-z0-9]", "", name.lower())
+        if norm in seen:
+            continue
+        seen.add(norm)
+        places.append({
+            "name":     name,
+            "lat":      float(item.get("latitude", lat)),
+            "lon":      float(item.get("longitude", lon)),
+            "category": str(item.get("category", "attraction")),
+            "osm_id":   "",
+            "priority": "llm_fallback",
+        })
+    print(f"  → LLM fallback: {len(places)} places for {destination}")
+    return places
+
+
 def _geocode(dest: str) -> Optional[dict]:
     print(f"  → Querying Nominatim for: {dest!r}")
     try:
@@ -128,71 +299,176 @@ def _deduplicate_places(raw: list) -> list:
     return kept
 
 
-def _fetch_osm(lat: float, lon: float) -> list:
+def _fetch_osm(lat: float, lon: float, destination: str = "") -> list:
+    """
+    Fetch tourist places in priority order:
+      P1 — Pure tourism + nature features (highest signal, no worship)
+      P2 — Hidden gems: scenic roads, gardens, waterbodies, heritage
+      P3 — Famous religious sites ONLY (wikipedia/wikidata tagged)
+    Generic temples/churches/mosques are excluded unless famous.
+    """
     t0 = time.time()
-    print(f"  → Search radius: {RADIUS_M/1000:.1f}km around ({lat:.4f}, {lon:.4f})")
-    print(f"  → Categories: attraction, museum, viewpoint, theme_park, zoo,")
-    print(f"                historic, waterfall, peak, park, place_of_worship")
+    R  = RADIUS_M
+    print(f"  → Search radius: {R/1000:.1f}km around ({lat:.4f}, {lon:.4f})")
+    print(f"  → Priority queries: tourism > nature > hidden gems > famous landmarks")
 
-    q = f"""[out:json][timeout:35];(
-      node["tourism"="attraction"](around:{RADIUS_M},{lat},{lon});
-      node["tourism"="museum"](around:{RADIUS_M},{lat},{lon});
-      node["tourism"="viewpoint"](around:{RADIUS_M},{lat},{lon});
-      node["tourism"="theme_park"](around:{RADIUS_M},{lat},{lon});
-      node["tourism"="zoo"](around:{RADIUS_M},{lat},{lon});
-      node["historic"]["name"](around:{RADIUS_M},{lat},{lon});
-      node["natural"="waterfall"]["name"](around:{RADIUS_M},{lat},{lon});
-      node["natural"="peak"]["name"](around:{RADIUS_M},{lat},{lon});
-      node["leisure"="park"]["name"](around:{RADIUS_M},{lat},{lon});
-      node["amenity"="place_of_worship"]["name"](around:{RADIUS_M},{lat},{lon});
-    );out body;"""
-    try:
-        print(f"  → Sending Overpass query...")
-        r = requests.post(OVERPASS_API, data={"data": q}, timeout=40)
-        r.raise_for_status()
-        elements = r.json().get("elements", [])
-        print(f"  → Overpass returned {len(elements)} raw elements ({_elapsed(t0)})")
+    # ── Priority 1: Pure tourism + natural features ───────────────────────────
+    q1 = f"""[out:json][timeout:30];(
+      node["tourism"="attraction"](around:{R},{lat},{lon});
+      node["tourism"="museum"](around:{R},{lat},{lon});
+      node["tourism"="viewpoint"](around:{R},{lat},{lon});
+      node["tourism"="theme_park"](around:{R},{lat},{lon});
+      node["tourism"="zoo"](around:{R},{lat},{lon});
+      node["tourism"="aquarium"](around:{R},{lat},{lon});
+      node["tourism"="gallery"](around:{R},{lat},{lon});
+      node["tourism"="picnic_site"]["name"](around:{R},{lat},{lon});
+      node["natural"="waterfall"]["name"](around:{R},{lat},{lon});
+      node["natural"="peak"]["name"](around:{R},{lat},{lon});
+      node["natural"="beach"]["name"](around:{R},{lat},{lon});
+      node["natural"="cave_entrance"]["name"](around:{R},{lat},{lon});
+      node["natural"="hot_spring"]["name"](around:{R},{lat},{lon});
+      node["natural"="spring"]["name"](around:{R},{lat},{lon});
+      node["natural"="geyser"]["name"](around:{R},{lat},{lon});
+      node["natural"="glacier"]["name"](around:{R},{lat},{lon});
+      way["tourism"="attraction"](around:{R},{lat},{lon});
+      way["natural"="water"]["name"](around:{R},{lat},{lon});
+      relation["natural"="water"]["name"](around:{R},{lat},{lon});
+    );out center body;"""
 
-        raw = []
-        cat_counts: dict = {}
-        for el in elements:
-            tags = el.get("tags", {})
-            name = tags.get("name", "").strip()
-            if not name:
-                continue
-            cat = (
-                tags.get("tourism")
-                or ("historic" if "historic" in tags else None)
-                or tags.get("natural")
-                or tags.get("leisure")
-                or tags.get("amenity")
-                or "attraction"
-            )
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
-            raw.append({
-                "name":     name,
-                "lat":      float(el["lat"]),
-                "lon":      float(el["lon"]),
-                "category": cat,
-                "osm_id":   str(el.get("id", "")),
-            })
+    # ── Priority 2: Hidden gems & outdoor spots ───────────────────────────────
+    q2 = f"""[out:json][timeout:30];(
+      node["leisure"="nature_reserve"]["name"](around:{R},{lat},{lon});
+      node["leisure"="park"]["name"](around:{R},{lat},{lon});
+      node["leisure"="garden"]["name"](around:{R},{lat},{lon});
+      node["leisure"="water_park"]["name"](around:{R},{lat},{lon});
+      node["leisure"="bird_hide"]["name"](around:{R},{lat},{lon});
+      node["leisure"="fishing"]["name"](around:{R},{lat},{lon});
+      node["landuse"="reservoir"]["name"](around:{R},{lat},{lon});
+      node["waterway"="waterfall"]["name"](around:{R},{lat},{lon});
+      node["waterway"="dam"]["name"](around:{R},{lat},{lon});
+      node["man_made"="lighthouse"]["name"](around:{R},{lat},{lon});
+      node["man_made"="dam"]["name"](around:{R},{lat},{lon});
+      node["amenity"="arts_centre"]["name"](around:{R},{lat},{lon});
+      node["amenity"="theatre"]["name"](around:{R},{lat},{lon});
+      node["boundary"="national_park"]["name"](around:{R},{lat},{lon});
+      way["leisure"="nature_reserve"](around:{R},{lat},{lon});
+      way["landuse"="reservoir"](around:{R},{lat},{lon});
+      way["waterway"="dam"](around:{R},{lat},{lon});
+    );out center body;"""
 
-        print(f"  → Named places: {len(raw)}")
-        print(f"  → By category: " + ", ".join(f"{k}={v}" for k,v in sorted(cat_counts.items())))
+    # ── Priority 3: Historic landmarks (forts, monuments — not generic temples) ─
+    q3 = f"""[out:json][timeout:25];(
+      node["historic"="fort"]["name"](around:{R},{lat},{lon});
+      node["historic"="castle"]["name"](around:{R},{lat},{lon});
+      node["historic"="monument"]["name"](around:{R},{lat},{lon});
+      node["historic"="memorial"]["name"](around:{R},{lat},{lon});
+      node["historic"="ruins"]["name"](around:{R},{lat},{lon});
+      node["historic"="archaeological_site"]["name"](around:{R},{lat},{lon});
+      node["historic"="palace"]["name"](around:{R},{lat},{lon});
+      node["historic"="battlefield"]["name"](around:{R},{lat},{lon});
+      way["historic"="fort"](around:{R},{lat},{lon});
+      way["historic"="castle"](around:{R},{lat},{lon});
+    );out center body;"""
 
-        print(f"  → Deduplicating (same name within {PROXIMITY_M}m)...")
-        places = _deduplicate_places(raw)
+    # ── Priority 4: ONLY famous religious sites (globally known, wiki-tagged) ──
+    q4 = f"""[out:json][timeout:20];(
+      node["tourism"="attraction"]["amenity"="place_of_worship"](around:{R},{lat},{lon});
+      node["amenity"="place_of_worship"]["wikidata"](around:{R},{lat},{lon});
+      node["amenity"="place_of_worship"]["wikipedia"](around:{R},{lat},{lon});
+    );out center body;"""
+
+    all_queries = [("tourism+nature", q1), ("hidden_gems", q2),
+                   ("historic", q3), ("famous_landmarks", q4)]
+
+    raw = []
+    seen_names = set()
+    cat_counts: dict = {}
+
+    for qname, q in all_queries:
+        if len(raw) >= MAX_PLACES * 2:  # collect 2x then trim at end
+            break
+        data = _overpass_post(q, timeout=40)
+        if data is None:
+            _warn(f"Query {qname} failed on all mirrors — skipping")
+            continue
+        try:
+            elements = data.get("elements", [])
+            batch_added = 0
+            for el in elements:
+                tags = el.get("tags", {})
+                name = tags.get("name", "").strip()
+                if not name:
+                    continue
+
+                # Skip generic worship places — only keep famous ones (q4 already filters)
+                if (tags.get("amenity") == "place_of_worship"
+                        and tags.get("tourism") != "attraction"
+                        and not tags.get("wikidata")
+                        and not tags.get("wikipedia")):
+                    continue
+
+                # Skip low-quality names
+                name_lower = name.lower()
+                if any(skip in name_lower for skip in [
+                    "kingdom hall", "csi church", "station church",
+                    "st joseph church", "st george church", "st mary",
+                    "jacobite church", "zion church", "bishop house",
+                ]):
+                    continue
+
+                norm = re.sub(r"[^a-z0-9]", "", name_lower)
+                if norm in seen_names:
+                    continue
+                seen_names.add(norm)
+
+                # Get coordinates (node direct or way center)
+                p_lat = el.get("lat") or (el.get("center") or {}).get("lat")
+                p_lon = el.get("lon") or (el.get("center") or {}).get("lon")
+                if not p_lat or not p_lon:
+                    continue
+
+                cat = (tags.get("tourism")
+                       or tags.get("natural")
+                       or tags.get("leisure")
+                       or tags.get("historic")
+                       or tags.get("waterway")
+                       or tags.get("man_made")
+                       or ("historic" if "historic" in tags else None)
+                       or "attraction")
+
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+                raw.append({
+                    "name":     name,
+                    "lat":      float(p_lat),
+                    "lon":      float(p_lon),
+                    "category": cat,
+                    "osm_id":   str(el.get("id", "")),
+                    "priority": qname,
+                })
+                batch_added += 1
+
+            print(f"  → [{qname}] +{batch_added} places ({_elapsed(t0)})")
+
+        except Exception as e:
+            _warn(f"Query {qname} processing error: {e}")
+
+    print(f"  → Total raw places: {len(raw)}")
+    print(f"  → By category: " + ", ".join(f"{k}={v}" for k,v in sorted(cat_counts.items())))
+    print(f"  → Deduplicating (same name within {PROXIMITY_M}m)...")
+    places = _deduplicate_places(raw)
+    places = places[:MAX_PLACES]
+
+    # ── LLM fallback when all Overpass mirrors returned nothing ──────────────
+    if not places:
+        _warn("All Overpass mirrors returned 0 places — switching to LLM fallback")
+        places = _llm_places_fallback(destination, lat, lon)
         places = places[:MAX_PLACES]
 
-        print(f"  → Final place list ({len(places)}):")
-        for i, p in enumerate(places, 1):
-            print(f"      {i:2d}. {p['name']:<35} [{p['category']}]  ({p['lat']:.4f}, {p['lon']:.4f})")
+    print(f"  → Final place list ({len(places)}):")
+    for i, p in enumerate(places, 1):
+        print(f"      {i:2d}. {p['name']:<35} [{p['category']}]  ({p['lat']:.4f}, {p['lon']:.4f})")
 
-        return places
-
-    except Exception as e:
-        _err(f"Overpass error: {e}")
-        return []
+    return places
 
 
 # ── Step 3: Build NetworkX graph ───────────────────────────────────────────────
@@ -534,9 +810,9 @@ def build_and_save_graph(
     # ── Step 2: Fetch OSM places ───────────────────────────────────────────
     _step(2, STEPS, "FETCHING PLACES FROM OPENSTREETMAP (Overpass API)")
     t0 = time.time()
-    places = _fetch_osm(loc["lat"], loc["lon"])
+    places = _fetch_osm(loc["lat"], loc["lon"], destination)
     if not places:
-        _err("No places found — aborting")
+        _err("No places found even after LLM fallback — aborting")
         return None
     _ok(f"{len(places)} unique places fetched and deduplicated in {_elapsed(t0)}")
 

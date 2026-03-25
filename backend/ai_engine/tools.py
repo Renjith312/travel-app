@@ -17,12 +17,36 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
 NOMINATIM         = "https://nominatim.openstreetmap.org/search"
-OVERPASS_API      = "https://overpass-api.de/api/interpreter"
+# Multiple Overpass mirrors — tried in order, first success wins
+OVERPASS_MIRRORS  = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
 ORS_BASE          = "https://api.openrouteservice.org/v2"
 RAPIDAPI_KEY      = os.getenv("RAPIDAPI_KEY", "")
 ORS_API_KEY       = os.getenv("OPENROUTESERVICE_API_KEY", "")
 BOOKING_HOST      = "booking-com.p.rapidapi.com"
 BOOKING_SEARCH_URL = "https://booking-com.p.rapidapi.com/v1/hotels/search-by-coordinates"
+
+
+def _overpass_post(query: str, timeout: int = 35) -> Optional[dict]:
+    """POST an Overpass query, trying each mirror until one succeeds."""
+    last_err = None
+    for mirror in OVERPASS_MIRRORS:
+        try:
+            r = requests.post(mirror, data={"data": query}, timeout=timeout)
+            if r.status_code == 429:
+                print(f"[TOOLS][overpass] 429 on {mirror} — trying next mirror")
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            print(f"[TOOLS][overpass] {mirror} failed: {e} — trying next mirror")
+    print(f"[TOOLS][overpass] All mirrors failed. Last error: {last_err}")
+    return None
 
 
 # ── Geocode ────────────────────────────────────────────────────────────────────
@@ -199,10 +223,11 @@ def _osm_stays(destination: str, limit: int = 15) -> List[Dict]:
 );
 out body;"""
     try:
-        r = requests.post(OVERPASS_API, data={"data": query}, timeout=30)
-        r.raise_for_status()
+        data = _overpass_post(query, timeout=30)
+        if not data:
+            return _fallback_stays(destination)
         stays = []
-        for el in r.json().get("elements", []):
+        for el in data.get("elements", []):
             tags = el.get("tags", {})
             name = tags.get("name")
             if not name: continue
@@ -325,10 +350,10 @@ out center body;"""
     for q in queries:
         if len(places) >= limit:
             break
-        try:
-            r = requests.post(OVERPASS_API, data={"data": q}, timeout=35)
-            r.raise_for_status()
-            for el in r.json().get("elements", []):
+        data = _overpass_post(q, timeout=35)
+        if not data:
+            continue
+        for el in data.get("elements", []):
                 if len(places) >= limit:
                     break
                 tags = el.get("tags", {})
@@ -361,11 +386,138 @@ out center body;"""
                     "longitude": el_lon,
                     "tags":      tags,
                 })
-        except Exception as e:
-            print(f"[TOOLS][places] Query error: {e}")
+
+    # ── LLM fallback when Overpass returns nothing ────────────────────────────
+    if not places:
+        print(f"[TOOLS][places] Overpass returned 0 — using LLM fallback for {destination}")
+        places = _llm_places_fallback(destination, interests, limit, lat, lon)
 
     print(f"[TOOLS][places] {len(places)} places for {destination}")
     return places
+
+
+def _robust_json_parse(text: str):
+    """Parse JSON from LLM output tolerating fences, trailing commas, comments."""
+    import json as _json, re as _re, ast as _ast
+
+    t = text.strip()
+    t = _re.sub(r"^```[a-zA-Z]*\n?", "", t)
+    t = _re.sub(r"\n?```$", "", t)
+    t = t.strip()
+
+    # Extract first [...] or {...} block
+    start = t.find("[")
+    if start == -1:
+        start = t.find("{")
+    if start != -1:
+        depth, in_str, esc, end = 0, False, False, -1
+        open_ch = t[start]
+        close_ch = "]" if open_ch == "[" else "}"
+        for i, ch in enumerate(t[start:], start):
+            if esc: esc = False; continue
+            if ch == "\\": esc = True; continue
+            if ch == '"' and not esc: in_str = not in_str
+            if in_str: continue
+            if ch == open_ch: depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0: end = i; break
+        if end != -1:
+            t = t[start:end + 1]
+
+    t = _re.sub(r"//[^\n]*", "", t)          # strip // comments
+    t = _re.sub(r",\s*([\]}])", r"\1", t)  # trailing commas
+
+    try:
+        return _json.loads(t)
+    except Exception:
+        pass
+    try:
+        return _ast.literal_eval(t)
+    except Exception:
+        return None
+
+
+def _llm_places_fallback(destination: str, interests: List[str],
+                          limit: int, lat: float, lon: float) -> List[Dict]:
+    """
+    Ask Gemini/OpenRouter for a list of tourist places when Overpass is unavailable.
+    Returns places in the same dict format as fetch_places().
+    """
+    try:
+        import json as _json
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        interest_hint = f" Focus on: {', '.join(interests)}." if interests else ""
+
+        prompt = (
+            f"List the top {min(limit, 25)} tourist attractions in {destination}, India."
+            f"{interest_hint} For each place return ONLY a JSON array (no markdown) with objects "
+            f"having keys: name (string), category (one of: attraction/museum/viewpoint/beach/"
+            f"fort/nature/park/waterfall/market), latitude (float), longitude (float). "
+            f"Use accurate GPS coordinates near ({lat:.4f}, {lon:.4f}). "
+            f"Include a mix of forts, beaches, markets, viewpoints, and nature spots."
+        )
+
+        data = None
+        if gemini_key:
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent",
+                    params={"key": gemini_key},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048}},
+                    timeout=20,
+                )
+                if r.status_code == 200:
+                    raw_text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    # Strip markdown fences if present
+                    data = _robust_json_parse(raw_text)
+            except Exception as e:
+                print(f"[TOOLS][llm_fallback] Gemini error: {e}")
+
+        if not data:
+            # Try OpenRouter as secondary LLM fallback
+            or_key = os.getenv("OPENROUTER_API_KEY", "")
+            or_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+            if or_key:
+                try:
+                    r = requests.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {or_key}",
+                                 "Content-Type": "application/json"},
+                        json={"model": or_model,
+                              "messages": [{"role": "user", "content": prompt}],
+                              "temperature": 0.2, "max_tokens": 2048},
+                        timeout=20,
+                    )
+                    if r.status_code == 200:
+                        raw_text = r.json()["choices"][0]["message"]["content"]
+                        data = _robust_json_parse(raw_text)
+                except Exception as e:
+                    print(f"[TOOLS][llm_fallback] OpenRouter error: {e}")
+
+        if not data or not isinstance(data, list):
+            print(f"[TOOLS][llm_fallback] No valid data from LLMs. Raw preview: {(raw_text or '')[:200]!r}")
+            return []
+
+        places = []
+        for item in data[:limit]:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            places.append({
+                "name":      str(item["name"]),
+                "category":  str(item.get("category", "attraction")),
+                "latitude":  float(item.get("latitude", lat)),
+                "longitude": float(item.get("longitude", lon)),
+                "tags":      {"source": "llm_fallback"},
+            })
+        print(f"[TOOLS][llm_fallback] Got {len(places)} places from LLM")
+        return places
+
+    except Exception as e:
+        print(f"[TOOLS][llm_fallback] Unexpected error: {e}")
+        return []
 
 
 # ── ORS matrix — place-to-place distances inside itinerary ────────────────────

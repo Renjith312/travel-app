@@ -145,11 +145,65 @@ def _search_station_code(city: str) -> Optional[str]:
     return None
 
 
-# Cities/towns with no railway station — skip IRCTC entirely
+# Cities with no railway station — skip IRCTC entirely for these
 _NO_RAIL_CITIES = {
     "munnar", "wayanad", "vagamon", "thekkady", "periyar", "varkala",
     "kovalam", "kumarakom", "athirappilly", "ooty", "coorg",
     "kodaikanal", "chikmagalur", "kasauli", "mcleod ganj",
+    "idukki", "ponmudi", "bekal",
+}
+
+# Hardcoded station codes for common Kerala/India cities
+# Avoids IRCTC API timeout for well-known stations
+_KNOWN_STATIONS = {
+    # Kerala
+    "kottayam":       "KTYM",
+    "kozhikode":      "CLT",
+    "calicut":        "CLT",
+    "thiruvananthapuram": "TVC",
+    "trivandrum":     "TVC",
+    "ernakulam":      "ERS",
+    "kochi":          "ERS",
+    "cochin":         "ERS",
+    "thrissur":       "TCR",
+    "palakkad":       "PGT",
+    "kollam":         "QLN",
+    "alappuzha":      "ALLP",
+    "alleppey":       "ALLP",
+    "kannur":         "CAN",
+    "kasaragod":      "KGQ",
+    "pathanamthitta": "PAA",
+    "kottarakkara":   "KTU",
+    "tirur":          "TIR",
+    "shoranur":       "SRR",
+    "ottapalam":      "OTP",
+    "kayamkulam":     "KYJ",
+    "changanacherry": "CGY",
+    "ettumanoor":     "ETM",
+    "vadakara":       "BDJ",
+    "nilambur":       "NBR",
+    # Tamil Nadu
+    "chennai":        "MAS",
+    "coimbatore":     "CBE",
+    "madurai":        "MDU",
+    "trichy":         "TPJ",
+    "salem":          "SA",
+    "tirunelveli":    "TEN",
+    "nagercoil":      "NCJ",
+    # Karnataka
+    "bangalore":      "SBC",
+    "bengaluru":      "SBC",
+    "mysore":         "MYS",
+    "mangalore":      "MAQ",
+    "hubli":          "UBL",
+    # Others
+    "mumbai":         "CSTM",
+    "delhi":          "NDLS",
+    "hyderabad":      "HYB",
+    "pune":           "PUNE",
+    "ahmedabad":      "ADI",
+    "kolkata":        "HWH",
+    "goa":            "MAO",
 }
 
 def _fetch_trains(origin: str, destination: str, date: str) -> List[Dict]:
@@ -162,8 +216,15 @@ def _fetch_trains(origin: str, destination: str, date: str) -> List[Dict]:
         print(f"[TRANSPORT][irctc] {destination} has no rail station — skipping")
         return []
 
-    from_code = _search_station_code(origin)
-    to_code   = _search_station_code(destination)
+    # Use hardcoded codes first — avoids API timeout
+    from_code = _KNOWN_STATIONS.get(origin.lower().strip())
+    to_code   = _KNOWN_STATIONS.get(destination.lower().strip())
+
+    # Only call API if not in hardcoded list
+    if not from_code:
+        from_code = _search_station_code(origin)
+    if not to_code:
+        to_code = _search_station_code(destination)
 
     if not from_code or not to_code:
         print(f"[TRANSPORT][irctc] Station not found: {origin}({from_code}) -> {destination}({to_code})")

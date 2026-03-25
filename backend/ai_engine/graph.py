@@ -23,7 +23,7 @@ except ImportError:
     except ImportError:
         MemorySaver = None
 
-import os, json, re, uuid, traceback
+import os, json, re, uuid, traceback, time
 from datetime import datetime, timedelta
 
 from ai_engine.llm import llm_chat_with_retry, _extract_json
@@ -204,18 +204,22 @@ def _regex_extract(msg: str, state: TravelState) -> dict:
                 result["duration_days"] = val
 
     # Travelers — explicit keyword match
-    if not state.get("num_travelers"):
+    if not state.get("num_travelers") and not result.get("num_travelers"):
         t2 = re.search(r"\b(\d+)\s*(?:people|persons?|travelers?|adults?|pax|of us|friends?)\b", mc)
         if t2:
             result["num_travelers"] = int(t2.group(1))
         elif re.fullmatch(r"\d+", mc.strip()):
             val = int(mc.strip())
             missing = _missing_fields(state)
-            # Assign bare number to num_travelers if:
-            #   - duration_days already filled (or just extracted)
-            #   - num_travelers is still missing
-            #   - value is small (1-30) — travelers not a duration or budget
-            if "num_travelers" in missing and "duration_days" not in result                     and state.get("duration_days") and 1 <= val <= 30:
+            duration_known = state.get("duration_days") or result.get("duration_days")
+            # Only assign to num_travelers if:
+            #   - duration_days already known (state OR just extracted in this call)
+            #   - this bare number wasn't already used for duration_days
+            #   - value is plausible for travelers (1-30)
+            if ("num_travelers" in missing
+                    and "duration_days" not in result
+                    and duration_known
+                    and 1 <= val <= 30):
                 result["num_travelers"] = val
 
     # Budget
@@ -653,17 +657,38 @@ def planning_intent_node(state: TravelState) -> TravelState:
         print("[PLANNING_INTENT_NODE] Fast regex → gather_info")
         state["detected_intent"] = "gather_info"; return state
 
-    # LLM for ambiguous
+    # Rule-based intent for common patterns — saves an LLM call
+    mc = msg.strip().lower()
+
+    # Short numeric or single-word replies during gathering = gather_info
+    if not core_complete:
+        if re.fullmatch(r"[\d\s,]+", mc):               # pure numbers
+            state["detected_intent"] = "gather_info"; return state
+        if len(mc.split()) <= 4:                         # very short — likely an answer
+            state["detected_intent"] = "gather_info"; return state
+
+    # Question words → ask_question
+    if any(mc.startswith(w) for w in ("what","where","when","how","why","which","is ","are ","can ")):
+        state["detected_intent"] = "ask_question" if core_complete else "gather_info"
+        return state
+
+    # Update keywords → update_itinerary
+    if core_complete and has_itinerary:
+        if any(w in mc for w in ("change","update","modify","replace","swap","different","instead","add","remove")):
+            state["detected_intent"] = "update_itinerary"; return state
+
+    # LLM only for truly ambiguous messages
     sys_p = f"""Intent classifier. core_complete={core_complete}, has_itinerary={has_itinerary}
-Fields: origin={state.get('origin')}, dest={state.get('destination')}, date={state.get('start_date')},
+Fields filled: origin={state.get('origin')}, dest={state.get('destination')}, date={state.get('start_date')},
 dep_time={state.get('departure_time')}, mode={state.get('travel_mode')},
 days={state.get('duration_days')}, travelers={state.get('num_travelers')}, budget={state.get('budget')}
 
 Intents: gather_info, create_itinerary, update_itinerary, ask_question, casual_chat
-Return ONLY JSON: {{"intent":"...","confidence":0.0}}"""
+Return ONLY JSON: {{"intent":"gather_info"}}"""
     try:
         r = _extract_json(llm_chat_with_retry(
-            [{"role":"system","content":sys_p},{"role":"user","content":f"User: {msg}"}], temperature=0.0))
+            [{"role":"system","content":sys_p},
+             {"role":"user","content":f"User: {msg}"}], temperature=0.0))
         state["detected_intent"] = r["intent"] if r and "intent" in r else "gather_info"
     except Exception as e:
         print(f"[PLANNING_INTENT_NODE] Error: {e}"); state["detected_intent"] = "gather_info"
@@ -694,6 +719,19 @@ def extract_info_node(state: TravelState) -> TravelState:
         for f in ["origin","destination","start_date","departure_time","travel_mode",
                   "duration_days","num_travelers","budget"]:
             if rx.get(f) is not None: state[f]=rx[f]; changed=True
+    elif re.fullmatch(r"\d+", msg.strip()):
+        # Pure number reply — assign based on what's missing, no LLM needed
+        val = int(msg.strip())
+        missing = _missing_fields(state)
+        if "num_travelers" in missing and 1 <= val <= 30:
+            state["num_travelers"] = val; changed = True
+            print(f"[EXTRACT_INFO_NODE] Bare number {val} → num_travelers")
+        elif "budget" in missing and val > 100:
+            state["budget"] = str(val); changed = True
+            print(f"[EXTRACT_INFO_NODE] Bare number {val} → budget")
+        elif "duration_days" in missing and 1 <= val <= 60:
+            state["duration_days"] = val; changed = True
+            print(f"[EXTRACT_INFO_NODE] Bare number {val} → duration_days")
     else:
         current = {k:state.get(k) for k in ["origin","destination","start_date","departure_time",
                                               "travel_mode","duration_days","num_travelers","budget"]}
@@ -729,12 +767,14 @@ num_travelers = number of people travelling (asked BEFORE duration_days)"""
     if state.get("destination") and not state.get("graph_ready"):
         state = _prepare_graph(state)
 
-    # If travel_mode just became "public" and we have all other fields, fetch options
+    # If travel_mode just became "public" and we have all needed fields, fetch options
+    # num_travelers is now collected before transport shown, so fares are accurate
     if (state.get("travel_mode") == "public"
             and not state.get("selected_transport")
             and not state.get("awaiting_transport_selection")
             and state.get("origin") and state.get("destination")
-            and state.get("start_date") and state.get("departure_time")):
+            and state.get("start_date") and state.get("departure_time")
+            and state.get("num_travelers")):
         print("[EXTRACT_INFO_NODE] Fetching public transport options...")
         opts = _fetch_transport_options(state)
         if opts:
@@ -761,20 +801,26 @@ def generate_question_node(state: TravelState) -> TravelState:
         ("origin",          "🏠 Where are you travelling **from**? (e.g. 'I am from Kottayam')"),
         ("destination",     "🌍 Where would you like to go?"),
         ("start_date",      "📅 What date are you planning to travel? (e.g. April 15)"),
+        ("num_travelers",   "👥 How many people are travelling?"),
         ("departure_time",  "🕐 What time are you planning to leave? (e.g. 8:30 AM)"),
         ("travel_mode",     "🚗 How are you travelling? Reply **private** (own car/bike) or **public** (bus/train/flight)"),
         ("duration_days",   "⏳ How many days will you spend at the destination?"),
-        ("num_travelers",   "👥 How many people are travelling?"),
         ("budget",          "💰 What's your total budget for the trip? (e.g. 50000)"),
     ]
     for field, question in qs:
         if not state.get(field):
-            # For public mode: skip duration_days and num_travelers until transport is selected
-            if field in ("duration_days", "num_travelers") and state.get("travel_mode") == "public" \
+            # For public mode: skip duration_days ONLY until transport option is selected
+            # num_travelers is asked BEFORE transport selection (it's needed to show fares)
+            if field == "duration_days" and state.get("travel_mode") == "public" \
                     and not state.get("selected_transport"):
                 continue
             state["final_response"] = question
             return state
+
+    # Safety check — if num_travelers still missing, ask it explicitly
+    if not state.get("num_travelers"):
+        state["final_response"] = "👥 How many people are travelling? (e.g. 2)"
+        return state
 
     # All collected
     n = state.get("num_travelers",1) or 1
@@ -809,124 +855,217 @@ def _fmt_places(gd: dict, limit: int = 25) -> str:
     return "\n".join(lines)
 
 
+def _generate_day(day_num, date, origin, destination,
+                   places_str, stays_str, hotel_name,
+                   day_type, travel_note, n, budget_per_day, dep_time):
+    """Generate a single day JSON via one LLM call."""
+
+    if day_type == "travel_out":
+        theme = f"Travel Day: {origin} to {destination}"
+        stay  = hotel_name
+        activities_instruction = (
+            f"Generate EXACTLY 3 activities:\n"
+            f"1. Depart {origin} at {dep_time} ({travel_note})\n"
+            f"2. Journey / en-route stop\n"
+            f"3. Arrive {destination}, check in to {hotel_name}"
+        )
+    elif day_type == "return":
+        theme = f"Return: {destination} to {origin}"
+        stay  = None
+        activities_instruction = (
+            f"Generate EXACTLY 3 activities:\n"
+            f"1. Morning checkout from {hotel_name}\n"
+            f"2. Depart {destination} back to {origin}\n"
+            f"3. Arrive {origin}"
+        )
+    else:
+        theme = f"Sightseeing in {destination} - Day {day_num}"
+        stay  = hotel_name
+        activities_instruction = (
+            f"Generate EXACTLY 4 activities using places from this list: {places_str}\n"
+            f"Include: morning attraction, lunch break, afternoon attraction, evening activity."
+        )
+
+    per_person = budget_per_day // max(n, 1)
+
+    # Build prompt as plain string — NO f-string for the JSON schema part
+    schema_example = (
+        '{\n'
+        '  "day_number": ' + str(day_num) + ',\n'
+        '  "date": "' + date + '",\n'
+        '  "theme": "' + theme + '",\n'
+        '  "stay_name": ' + json.dumps(stay) + ',\n'
+        '  "activities": [\n'
+        '    {\n'
+        '      "name": "activity name",\n'
+        '      "details": "one sentence description",\n'
+        '      "start_time": "09:00 AM",\n'
+        '      "end_time": "11:00 AM",\n'
+        '      "location": {"lat": 11.25, "lon": 75.77},\n'
+        '      "estimatedCost": 200\n'
+        '    }\n'
+        '  ]\n'
+        '}'
+    )
+
+    prompt = (
+        f"You are generating Day {day_num} of a {origin} to {destination} trip.\n"
+        f"Date: {date} | Travelers: {n} | Budget per person: Rs {per_person}\n"
+        f"Hotel: {hotel_name}\n\n"
+        f"{activities_instruction}\n\n"
+        f"Each activity MUST have: name, details, start_time, end_time, location (lat/lon near {destination}), estimatedCost (INR number).\n\n"
+        f"Output ONLY this JSON structure (no markdown, no explanation):\n"
+        f"{schema_example}"
+    )
+
+    sys_msg = (
+        "You are a JSON generator. Output ONLY valid JSON. "
+        "No markdown fences. No ```json. No explanation. "
+        "Your entire response must start with { and end with }."
+    )
+
+    def _fallback_day():
+        return {
+            "day_number": day_num,
+            "date":       date,
+            "theme":      theme,
+            "stay_name":  stay,
+            "activities": [{
+                "name":          theme,
+                "details":       f"Explore {destination}.",
+                "start_time":    "09:00 AM",
+                "end_time":      "06:00 PM",
+                "location":      {"lat": 0.0, "lon": 0.0},
+                "estimatedCost": per_person,
+            }]
+        }
+
+    try:
+        resp = llm_chat_with_retry(
+            [
+                {"role": "system", "content": sys_msg},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+    except Exception as e:
+        print(f"[DAY_GEN] Day {day_num} LLM error: {e} — using fallback")
+        return _fallback_day()
+
+    result = _extract_json(resp)
+
+    if not result or not result.get("activities"):
+        print(f"[DAY_GEN] Day {day_num} — no activities, raw:\n{resp[:500]}")
+        return _fallback_day()
+
+    result["day_number"] = day_num
+    result["date"]       = date
+    result["theme"]      = result.get("theme", theme)
+    result["stay_name"]  = result.get("stay_name", stay)
+    print(f"[DAY_GEN] Day {day_num} — {len(result['activities'])} activities OK")
+    return result
+
+
 def create_itinerary_node(state: TravelState) -> TravelState:
-    destination = state.get("destination","")
-    origin      = state.get("origin","your starting location")
+    destination = state.get("destination", "")
+    origin      = state.get("origin", "your starting location")
     if not destination or destination.strip().lower() in _BAD_DEST:
         state["final_response"] = "I need to know your destination. Where would you like to go?"
         return state
 
-    print(f"\n[CREATE_ITINERARY_NODE] {origin} → {destination}")
+    print(f"\n[CREATE_ITINERARY_NODE] {origin} → {destination} (day-by-day chunked)")
     try:
-        if not state.get("graph_ready"): state = _prepare_graph(state)
+        if not state.get("graph_ready"):
+            state = _prepare_graph(state)
 
         stays = fetch_stays(destination=destination, budget=state.get("budget"))
         state["stays"] = stays
         print(f"  → {len(stays)} stays")
 
-        # Build consistent hotel price map (one price per hotel)
-        hotel_price_notes = "IMPORTANT: Use ONE consistent price per hotel for ALL days. Do not vary the price."
-
-        graph_data = state.get("graph_data")
-        if state.get("has_graph_data") and graph_data:
-            places_block = _fmt_places(graph_data, 25)
-            data_label   = f"GRAPH DATA ({graph_data['total_nodes']} places with connections)"
-        else:
-            places_block = json.dumps(state.get("places",[])[:18], indent=2)
-            data_label   = "AVAILABLE PLACES"
-
-        stays_compact = [{"name":s["name"],"type":s.get("type","hotel"),
-                          "lat":s.get("latitude",0),"lon":s.get("longitude",0)}
-                         for s in stays[:8]]
-
-        n         = int(state.get("num_travelers") or 1)
-        duration  = int(state.get("duration_days") or 3)
-        dep_time  = state.get("departure_time","morning")
-        mode      = state.get("travel_mode","private")
-        transport = state.get("selected_transport","")
-        total_days = duration + 2  # travel + destination days + return
+        n          = int(state.get("num_travelers") or 1)
+        duration   = int(state.get("duration_days") or 3)
+        dep_time   = state.get("departure_time", "morning")
+        mode       = state.get("travel_mode", "private")
+        transport  = state.get("selected_transport", "")
+        total_days = duration + 2
+        budget     = int(str(state.get("budget") or "10000").replace(",", "").replace("₹", ""))
 
         start_dt = datetime.fromisoformat(state["start_date"]) if state.get("start_date") else datetime.now()
         dates    = [(start_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(total_days)]
 
-        # Estimate arrival time for Day 1 sightseeing check
         if mode == "private":
-            travel_note = f"Traveling by private vehicle from {origin}. Departure: {dep_time}."
-            day1_sight  = "If arrival before 3 PM, include 1-2 nearby sightseeing spots on Day 1."
+            travel_note = f"private vehicle, depart {dep_time}"
         elif transport:
-            # Parse arrival from selected transport
-            arr_match = re.search(r"arrives?\s+(\d{1,2}[:.]\d{2}\s*(?:AM|PM)?)", transport, re.IGNORECASE)
-            arr_time  = arr_match.group(1) if arr_match else "evening"
-            travel_note = f"Traveling by public transport: {transport}. Arrives ~{arr_time}."
-            day1_sight  = f"If arrival before 3 PM ({arr_time}), include 1-2 sightseeing spots on Day 1 after check-in."
+            travel_note = transport
         else:
-            travel_note = f"Traveling from {origin} to {destination}. Departure: {dep_time}."
-            day1_sight  = "If arrival before 3 PM, include 1-2 nearby sightseeing spots on Day 1."
+            travel_note = f"public transport"
 
-        old_itin_section = ""
-        if state.get("itinerary"):
-            old_itin_section = "\n\nEXISTING ITINERARY (improve, keep what is good):\n" + json.dumps(state["itinerary"], indent=2)
+        # ── Compact shared context strings ────────────────────────────────────
+        graph_data = state.get("graph_data")
+        if state.get("has_graph_data") and graph_data:
+            place_names = [p["name"] for p in list(graph_data["places"].values())[:12]]
+        else:
+            place_names = [p["name"] for p in state.get("places", [])[:12]]
+        places_str = ", ".join(place_names) if place_names else f"popular spots in {destination}"
 
-        prompt = f"""You are a travel planner. Return ONLY a JSON itinerary.
+        hotel_name = stays[0]["name"] if stays else f"{destination} Hotel"
+        budget_per_day = budget // total_days if total_days else budget
 
-Trip: {origin} → {destination}, {state.get('start_date')}, {dep_time} departure
-{n} travelers, budget ₹{state.get('budget')}, {duration} days at destination
+        # ── Generate each day as a separate small LLM call ───────────────────
+        daily_plans = []
+        for i in range(total_days):
+            day_num  = i + 1
+            day_type = "travel_out" if i == 0 else ("return" if i == total_days - 1 else "sightseeing")
 
-{data_label}:
-{places_block}
+            print(f"[CREATE_ITINERARY_NODE] Generating Day {day_num}/{total_days} ({day_type})...")
+            if day_num > 1:
+                time.sleep(5)  # 5s between days = 12 RPM, safely under 15 RPM free limit
+            day = _generate_day(
+                day_num=day_num, date=dates[i],
+                origin=origin, destination=destination,
+                places_str=places_str, stays_str=", ".join(s["name"] for s in stays[:4]),
+                hotel_name=hotel_name,
+                day_type=day_type, travel_note=travel_note,
+                n=n, budget_per_day=budget_per_day, dep_time=dep_time,
+            )
+            daily_plans.append(day)
+            print(f"[CREATE_ITINERARY_NODE] Day {day_num} ✅  {len(day.get('activities', []))} activities")
 
-Stays (pick one per destination day, USE CONSISTENT PRICE for same hotel):
-{json.dumps(stays_compact, separators=(',',':'))}
-
-{hotel_price_notes}
-
-Transport: {travel_note}
-{old_itin_section}
-
-RULES:
-1. Day 1 = Travel day from {origin}.
-   Include: depart {origin}, journey details, arrive {destination}, check-in.
-   {day1_sight}
-   estimatedCost = transport cost per person (₹).
-2. Days 2 to {duration+1} = Full sightseeing days at {destination}.
-   Use ONLY places from list. 4-5 activities/day. stay_name from stays list.
-   Next day starts from previous stay.
-3. Day {total_days} = Return travel {destination} → {origin}.
-   No stay_name. estimatedCost = return transport cost.
-4. estimatedCost is PER PERSON in ₹ for every activity.
-5. For accommodation: estimatedCost = price per room per night (SAME price every time same hotel appears).
-6. Return raw JSON only — no markdown.
-
-Schema:
-{{"destination":"{destination}","origin":"{origin}","start_date":"{state.get('start_date')}","duration_days":{total_days},"num_travelers":{n},"daily_plans":[{{"day_number":1,"date":"{dates[0]}","theme":"Travel Day: {origin} → {destination}","stay_name":"hotel name","activities":[{{"time":"Morning","name":"activity","details":"description","start_time":"09:00 AM","end_time":"11:00 AM","location":{{"lat":0.0,"lon":0.0}},"travel_from_previous":"X min by car","estimatedCost":500}}]}}],"notes":{{"packing":"...","tips":"..."}}}}"""
-
-        print("[CREATE_ITINERARY_NODE] Calling LLM...")
-        resp = llm_chat_with_retry(
-            [{"role":"system","content":prompt},
-             {"role":"user","content":"Generate the complete itinerary JSON now."}],
-            temperature=0.7, max_tokens=4000)
-
-        itin = _extract_json(resp)
-        if not itin: raise ValueError("LLM did not return valid JSON")
+        itin = {
+            "destination":   destination,
+            "origin":        origin,
+            "start_date":    state.get("start_date"),
+            "duration_days": total_days,
+            "num_travelers": n,
+            "daily_plans":   daily_plans,
+            "notes": {
+                "packing": "Light clothes, sunscreen, comfortable shoes",
+                "tips":    f"Carry cash for local markets. Stay hydrated.",
+            }
+        }
 
         itin["num_travelers"] = n
-        state["itinerary"] = itin
-        print("[CREATE_ITINERARY_NODE] ✅ Done")
+        state["itinerary"]    = itin
+        print("[CREATE_ITINERARY_NODE] ✅ All days generated")
         _compute_and_print_cost(state)
 
         if state.get("trip_id"):
-            try: state["itinerary_id"] = _save_itinerary(state); print(f"  Saved: {state['itinerary_id']}")
-            except Exception as e: print(f"  DB save (non-fatal): {e}")
+            try:
+                state["itinerary_id"] = _save_itinerary(state)
+                print(f"  Saved: {state['itinerary_id']}")
+            except Exception as e:
+                print(f"  DB save (non-fatal): {e}")
 
         state["final_response"] = (
             f"✅ Your {total_days}-day itinerary is ready!\n"
             f"🏠 **{origin}** → 📍 **{destination}** → 🏠 **{origin}**\n"
-            f"({duration} days sightseeing, {n} traveler{'s' if n>1 else ''})\n\n"
+            f"({duration} days sightseeing, {n} traveler{'s' if n > 1 else ''})\n\n"
             f"The full cost breakdown has been printed to the server terminal. 💰"
         )
     except ValueError as e:
         if "API key" in str(e):
-            state["final_response"] = "❌ The OpenRouter API key is invalid or expired. Please check your `.env` file and restart the server."
+            state["final_response"] = "❌ The OpenRouter API key is invalid or expired. Please check your `.env` file."
         else:
             print(f"[CREATE_ITINERARY_NODE] ❌ {e}"); traceback.print_exc()
             state["final_response"] = "I had trouble generating your itinerary. Please try again."

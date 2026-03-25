@@ -279,18 +279,58 @@ def _build_db_url() -> str:
     url = os.getenv('DATABASE_URL')
     if not url:
         raise ValueError("DATABASE_URL not set in .env")
+    # Strip any Supabase-specific params that psycopg2 doesn't understand
+    import re as _re
+    url = _re.sub(r'[?&]pgbouncer=[^&]*', '', url)
+    url = _re.sub(r'[?&]prepared_statements=[^&]*', '', url)
     return url
 
 
-def get_engine():
-    return create_engine(_build_db_url(), pool_pre_ping=True)
+_engine = None
 
+def _create_engine_instance():
+    from sqlalchemy.pool import NullPool
+    # Use NullPool with Supabase — don't maintain a local pool at all.
+    # PgBouncer (Supabase side) IS the pool. Local pooling fights with it
+    # and causes "SSL connection closed unexpectedly" on idle connections.
+    # NullPool = open a fresh connection per request, close immediately after.
+    # This is slightly slower per request but 100% reliable with Supabase.
+    return create_engine(
+        _build_db_url(),
+        poolclass=NullPool,
+        connect_args={
+            "connect_timeout": 10,
+            "sslmode":         "require",
+        },
+    )
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = _create_engine_instance()
+    return _engine
+
+def reset_engine():
+    """Dispose current engine and create a fresh one."""
+    global _engine
+    if _engine is not None:
+        try:
+            _engine.dispose(close=True)
+        except Exception:
+            pass
+    _engine = _create_engine_instance()
+    return _engine
 
 def init_database():
     engine = get_engine()
     Base.metadata.create_all(engine)
     print("✅ Database tables ready")
 
-
 def get_session_maker():
-    return sessionmaker(bind=get_engine(), expire_on_commit=False)
+    from sqlalchemy.orm import sessionmaker as _sm
+    return _sm(
+        bind=get_engine(),
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=True,
+    )

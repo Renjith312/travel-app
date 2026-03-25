@@ -1,121 +1,98 @@
-"""
-Run this on your LOCAL machine (not in Claude sandbox) to verify both API keys.
-  python test_keys.py
-"""
-import requests, json
+import requests
+import itertools
+import time
 
-RAPIDAPI_KEY    = "a907016344msheed8cb3412dcd24p10868djsnfde2c45695fd"
-GOOGLE_MAPS_KEY = "AIzaSyB5aw_Q3RCGGGI7N9csV_e1cF7iTWHJp94"
+API_KEY = "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"
+BASE_URL = "https://openrouter.ai/api/v1"
+HEADERS = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://localhost",
+    "X-Title": "Travel Guide",
+}
 
-PASS = "✅"; FAIL = "❌"; WARN = "⚠️ "
+# ── Auto-discover working free models ─────────────────────────────────────────
 
-def sep(title):
-    print(f"\n{'='*55}\n  {title}\n{'='*55}")
+def get_free_models():
+    r = requests.get(f"{BASE_URL}/models", headers=HEADERS)
+    r.raise_for_status()
+    return [
+        m["id"] for m in r.json()["data"]
+        if m.get("pricing", {}).get("prompt") in ("0", 0)
+        and m.get("pricing", {}).get("completion") in ("0", 0)
+    ]
 
-# ── Test 1: Google Maps Distance Matrix ───────────────────────────────────────
-sep("TEST 1 — Google Maps: Kochi → Munnar")
-try:
-    r = requests.get(
-        "https://maps.googleapis.com/maps/api/distancematrix/json",
-        params={
-            "origins":      "Kochi, Kerala, India",
-            "destinations": "Munnar, Kerala, India",
-            "mode":         "driving",
-            "units":        "metric",
-            "key":          GOOGLE_MAPS_KEY,
-        },
-        timeout=10,
-    )
-    d = r.json()
-    status = d.get("status")
-    if status == "OK":
-        el = d["rows"][0]["elements"][0]
-        if el.get("status") == "OK":
-            print(f"{PASS} Distance : {el['distance']['text']}")
-            print(f"{PASS} Duration : {el['duration']['text']}")
-            print(f"{PASS} Google Maps key is VALID and working!")
-        else:
-            print(f"{FAIL} Route element status: {el.get('status')}")
-    elif status == "REQUEST_DENIED":
-        print(f"{FAIL} Key rejected: {d.get('error_message','')}")
-        print("   → Make sure 'Distance Matrix API' is enabled in Google Cloud Console")
-    else:
-        print(f"{FAIL} Unexpected status: {status}")
-        print(json.dumps(d, indent=2))
-except Exception as e:
-    print(f"{FAIL} Error: {e}")
+def probe_model(model_id):
+    try:
+        r = requests.post(
+            f"{BASE_URL}/chat/completions", headers=HEADERS,
+            json={"model": model_id, "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 5},
+            timeout=15,
+        )
+        return r.status_code == 200
+    except:
+        return False
 
-# ── Test 2: RapidAPI — IRCTC Station Search ───────────────────────────────────
-sep("TEST 2 — RapidAPI IRCTC: Search 'Ernakulam'")
-try:
-    r = requests.get(
-        "https://irctc1.p.rapidapi.com/api/v1/searchStation",
-        headers={
-            "X-RapidAPI-Key":  RAPIDAPI_KEY,
-            "X-RapidAPI-Host": "irctc1.p.rapidapi.com",
-        },
-        params={"query": "Ernakulam"},
-        timeout=10,
-    )
-    print(f"HTTP {r.status_code}")
-    if r.status_code == 200:
-        stations = r.json().get("data", [])
-        for s in stations[:3]:
-            print(f"  Station: {s.get('stationName')} ({s.get('stationCode')})")
-        print(f"{PASS} IRCTC API key is VALID!")
-    elif r.status_code == 401:
-        print(f"{FAIL} Unauthorized — key invalid")
-    elif r.status_code == 403:
-        print(f"{FAIL} Not subscribed — go to:")
-        print("   https://rapidapi.com/IRCTC/api/irctc1  → Subscribe (free tier)")
-    else:
-        print(f"{FAIL} HTTP {r.status_code}: {r.text[:200]}")
-except Exception as e:
-    print(f"{FAIL} Error: {e}")
+def discover_working_models():
+    print("🔍 Discovering working free models...")
+    all_free = get_free_models()
+    working = []
+    for m in all_free:
+        ok = probe_model(m)
+        print(f"  {'✅' if ok else '❌'} {m}")
+        if ok:
+            working.append(m)
+        time.sleep(0.4)
+    print(f"\n✅ {len(working)}/{len(all_free)} models available\n")
+    return working
 
-# ── Test 3: RapidAPI — Booking.com Hotel Search ───────────────────────────────
-sep("TEST 3 — RapidAPI Booking.com: Hotels in Munnar")
-try:
-    r = requests.get(
-        "https://booking-com.p.rapidapi.com/v1/hotels/search-by-coordinates",
-        headers={
-            "X-RapidAPI-Key":  RAPIDAPI_KEY,
-            "X-RapidAPI-Host": "booking-com.p.rapidapi.com",
-        },
-        params={
-            "latitude":       "10.0892",
-            "longitude":      "77.0595",
-            "checkin_date":   "2026-04-01",
-            "checkout_date":  "2026-04-02",
-            "adults_number":  "2",
-            "room_number":    "1",
-            "locale":         "en-gb",
-            "currency":       "INR",
-            "order_by":       "popularity",
-            "page_number":    "0",
-        },
-        timeout=15,
-    )
-    print(f"HTTP {r.status_code}")
-    if r.status_code == 200:
-        hotels = r.json().get("result", [])
-        print(f"Hotels found: {len(hotels)}")
-        for h in hotels[:3]:
-            price = h.get("min_total_price", "?")
-            name  = h.get("hotel_name", "?")
-            score = h.get("review_score", "?")
-            print(f"  {name} — ₹{price}/stay — Score: {score}/10")
-        print(f"{PASS} Booking.com API key is VALID!")
-    elif r.status_code == 401:
-        print(f"{FAIL} Unauthorized — key invalid")
-    elif r.status_code == 403:
-        print(f"{FAIL} Not subscribed — go to:")
-        print("   https://rapidapi.com/tipsters/api/booking-com  → Subscribe (free tier)")
-    else:
-        print(f"{WARN} HTTP {r.status_code}: {r.text[:300]}")
-except Exception as e:
-    print(f"{FAIL} Error: {e}")
+# ── Rotator class ──────────────────────────────────────────────────────────────
 
-print(f"\n{'='*55}")
-print("  Done. Fix any FAIL items above before deploying.")
-print(f"{'='*55}\n")
+class OpenRouterRotator:
+    def __init__(self, models: list):
+        self.models = models
+        self._cycle = itertools.cycle(models)
+        self.stats = {m: {"success": 0, "fail": 0} for m in models}
+
+    def chat(self, messages: list, max_retries: int = None) -> str:
+        max_retries = max_retries or len(self.models)
+        for _ in range(max_retries):
+            model = next(self._cycle)
+            try:
+                r = requests.post(
+                    f"{BASE_URL}/chat/completions", headers=HEADERS,
+                    json={"model": model, "messages": messages, "max_tokens": 1000},
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    self.stats[model]["success"] += 1
+                    content = r.json()["choices"][0]["message"]["content"]
+                    print(f"[{model}] ✅")
+                    return content
+                else:
+                    self.stats[model]["fail"] += 1
+                    print(f"[{model}] ❌ {r.status_code} — rotating...")
+            except Exception as e:
+                self.stats[model]["fail"] += 1
+                print(f"[{model}] 💥 {e} — rotating...")
+        raise RuntimeError("All models failed.")
+
+    def print_stats(self):
+        print("\n📊 Model Stats:")
+        for m, s in self.stats.items():
+            print(f"  {m}: ✅{s['success']} ❌{s['fail']}")
+
+# ── Usage ──────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    working_models = discover_working_models()
+    rotator = OpenRouterRotator(working_models)
+
+    # Example usage in your travel guide
+    response = rotator.chat([
+        {"role": "system", "content": "You are a helpful travel guide assistant."},
+        {"role": "user", "content": "Suggest 3 must-visit places in Kerala, India."}
+    ])
+    print("\n", response)
+
+    rotator.print_stats()
