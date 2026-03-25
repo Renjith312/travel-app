@@ -286,11 +286,17 @@ def send_message(current_user):
 
     print(f"[CHAT] phase={result.get('current_phase')} intent={result.get('detected_intent')} complete={result.get('core_info_complete')}")
 
+    # ── Get a FRESH db session after graph runs (graph can take 60s — old session may be dead)
+    db = get_db()
+
     # Save user message
     try:
         db.add(ChatMessage(id=generate_uuid(), userId=current_user["id"], tripId=tid,
             role=MessageRole.USER, content=msg)); db.commit()
-    except Exception: pass
+    except Exception as e:
+        print(f"[CHAT] User msg save failed (non-fatal): {e}")
+        try: db.rollback()
+        except: pass
 
     ai_reply         = result.get("final_response","I encountered an issue. Please try again.")
     itin_generated   = result.get("itinerary") is not None
@@ -301,7 +307,15 @@ def send_message(current_user):
     if itin_generated:
         ai_reply += "\n\n✨ **Your itinerary is ready!** Check the itinerary panel."
         response_data["message"] = ai_reply
-        trip.conversationPhase = "generated"; db.commit()
+        try:
+            trip = db.query(Trip).filter_by(id=tid).first()
+            if trip:
+                trip.conversationPhase = "generated"
+                db.commit()
+        except Exception as e:
+            print(f"[CHAT] Phase update failed (non-fatal): {e}")
+            try: db.rollback()
+            except: pass
 
         try:
             itin_data = result["itinerary"]
@@ -379,14 +393,21 @@ def send_message(current_user):
             response_data["itinerary"] = {"id":itin_obj.id,"summary":summary,
                 "highlights":highlights,"activities":acts_resp}
         except Exception as e:
-            db.rollback(); print(f"[CHAT] Itinerary DB error: {e}")
+            try: db.rollback()
+            except: pass
+            print(f"[CHAT] Itinerary DB error (non-fatal): {e}")
+            # Get fresh session for AI message save
+            db = get_db()
 
     # Save AI message
     try:
         db.add(ChatMessage(id=generate_uuid(), userId=current_user["id"], tripId=tid,
             role=MessageRole.ASSISTANT, content=response_data["message"],
             intent=result.get("detected_intent"))); db.commit()
-    except Exception: pass
+    except Exception as e:
+        print(f"[CHAT] AI msg save failed (non-fatal): {e}")
+        try: db.rollback()
+        except: pass
 
     # Trip status summary
     if result.get("core_info_complete"):
