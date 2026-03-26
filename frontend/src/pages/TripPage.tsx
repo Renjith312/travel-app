@@ -3,10 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { Trip, Itinerary, Activity, RawActivity, DayPlan } from '../types';
 import { ArrowLeft, Calendar, Users, Wallet, Hotel,
-         Clock, Car, CheckCircle, Edit3, ChevronRight,
+         Clock, Car, CheckCircle, Edit3, ChevronRight, ChevronDown,
          Compass, Sun, Sunset, Moon, AlertCircle } from 'lucide-react';
 import { format, parseISO, isToday, isTomorrow, isPast, addDays } from 'date-fns';
 import './TripPage.css';
+import DayMap from './DayMap';
 
 const ACT_ICON: Record<string,string> = {
   FOOD:'🍽️', ACCOMMODATION:'🏨', TRANSPORT:'🚗',
@@ -42,6 +43,154 @@ interface EditValues {
   endTime?: string;
   estimatedCost?: string;
   notes?: string;
+}
+
+// ── Budget Split ───────────────────────────────────────────────
+const CAT_COLOR: Record<string, string> = {
+  ACCOMMODATION: '#6c8eff',
+  TRANSPORT:     '#34d399',
+  FOOD:          '#fbbf24',
+  SIGHTSEEING:   '#a78bfa',
+  ACTIVITY:      '#f97316',
+  SHOPPING:      '#ec4899',
+  RELAXATION:    '#2dd4bf',
+  NIGHTLIFE:     '#818cf8',
+  OTHER:         '#6b7280',
+};
+const CAT_LABEL: Record<string, string> = {
+  ACCOMMODATION: 'Stay',
+  TRANSPORT:     'Transport',
+  FOOD:          'Food & Dining',
+  SIGHTSEEING:   'Sightseeing',
+  ACTIVITY:      'Activities',
+  SHOPPING:      'Shopping',
+  RELAXATION:    'Relaxation',
+  NIGHTLIFE:     'Nightlife',
+  OTHER:         'Other',
+};
+
+function fmtK(n: number): string {
+  return n >= 1000 ? `₹${(n / 1000).toFixed(1)}k` : `₹${n}`;
+}
+
+interface BudgetSplitProps {
+  trip: Trip;
+  plans: DayPlan[];
+  acts: Activity[];
+}
+function BudgetSplit({ trip, plans, acts }: BudgetSplitProps) {
+  const [open, setOpen] = useState(true);
+
+  // Aggregate costs — prefer fullItinerary daily_plans when available
+  const items: { type: string; cost: number; day: number }[] = [];
+  if (plans.length > 0) {
+    plans.forEach(dp => {
+      (dp.activities || []).forEach((a: RawActivity) => {
+        const cost = Number(a.estimatedCost) || 0;
+        if (cost > 0) items.push({ type: (a.type || 'OTHER').toUpperCase(), cost, day: dp.day_number });
+      });
+    });
+  } else {
+    acts.forEach(a => {
+      const cost = a.estimatedCost || 0;
+      if (cost > 0) items.push({ type: (a.type || 'OTHER').toUpperCase(), cost, day: a.dayNumber });
+    });
+  }
+
+  const totalEst   = items.reduce((s, i) => s + i.cost, 0);
+  const totalBudget = trip.totalBudget || 0;
+  if (totalEst === 0) return null;
+
+  // By category
+  const byCat: Record<string, number> = {};
+  items.forEach(({ type, cost }) => { byCat[type] = (byCat[type] || 0) + cost; });
+  const sortedCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+
+  // By day
+  const byDay: Record<number, number> = {};
+  items.forEach(({ day, cost }) => { byDay[day] = (byDay[day] || 0) + cost; });
+  const dayEntries = Object.entries(byDay).sort((a, b) => Number(a[0]) - Number(b[0]));
+  const maxDay     = Math.max(...Object.values(byDay), 1);
+
+  const overBudget = totalBudget > 0 && totalEst > totalBudget;
+  const fillPct    = totalBudget > 0 ? Math.min((totalEst / totalBudget) * 100, 100) : 100;
+
+  return (
+    <div className="budget-split-wrap">
+      <button className="budget-split-toggle" onClick={() => setOpen(o => !o)}>
+        <Wallet size={13} />
+        <span>Budget Overview</span>
+        <span className={`bs-toggle-total${overBudget ? ' over' : ''}`}>
+          ₹{totalEst.toLocaleString()}
+          {totalBudget > 0 && <span className="bs-toggle-of"> / ₹{totalBudget.toLocaleString()}</span>}
+        </span>
+        <ChevronDown size={13} className={`bs-chevron${open ? ' open' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="budget-split-body">
+
+          {/* Overall progress bar */}
+          {totalBudget > 0 && (
+            <div className="bs-progress-section">
+              <div className="bs-progress-track">
+                <div
+                  className={`bs-progress-fill${overBudget ? ' over' : ''}`}
+                  style={{ width: `${fillPct}%` }}
+                />
+              </div>
+              <span className={`bs-progress-note${overBudget ? ' over' : ''}`}>
+                {overBudget
+                  ? `⚠ ₹${(totalEst - totalBudget).toLocaleString()} over budget`
+                  : `₹${(totalBudget - totalEst).toLocaleString()} remaining`}
+              </span>
+            </div>
+          )}
+
+          {/* Category rows */}
+          <div className="bs-cats">
+            {sortedCats.map(([cat, amt]) => (
+              <div key={cat} className="bs-cat-row">
+                <div className="bs-cat-label">
+                  <span className="bs-cat-dot" style={{ background: CAT_COLOR[cat] || '#6b7280' }} />
+                  <span className="bs-cat-name">{CAT_LABEL[cat] || cat}</span>
+                </div>
+                <div className="bs-cat-right">
+                  <div className="bs-cat-track">
+                    <div
+                      className="bs-cat-fill"
+                      style={{ width: `${(amt / totalEst) * 100}%`, background: CAT_COLOR[cat] || '#6b7280' }}
+                    />
+                  </div>
+                  <span className="bs-cat-amt">₹{amt.toLocaleString()}</span>
+                  <span className="bs-cat-pct">{Math.round((amt / totalEst) * 100)}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Per-day mini bar chart */}
+          {dayEntries.length > 1 && (
+            <div className="bs-days-section">
+              <div className="bs-days-title">Per Day</div>
+              <div className="bs-day-bars">
+                {dayEntries.map(([day, cost]) => (
+                  <div key={day} className="bs-day-col" title={`Day ${day}: ₹${cost.toLocaleString()}`}>
+                    <div className="bs-day-bar-wrap">
+                      <div className="bs-day-bar" style={{ height: `${Math.round((cost / maxDay) * 44)}px` }} />
+                    </div>
+                    <span className="bs-day-label">D{day}</span>
+                    <span className="bs-day-amt">{fmtK(Math.round(cost))}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function TripPage() {
@@ -154,18 +303,21 @@ export default function TripPage() {
       </aside>
 
       <main className="trip-main">
-        {openDay&&dayMap[openDay]&&(
-          <DayDetail
-            day={openDay} dp={dayMap[openDay]}
-            label={getDayLabel(openDay)}
-            nextStay={dayMap[openDay+1]?.stay}
-            isCurrent={isCurrent(openDay)}
-            editing={editing} editVal={editVal}
-            setEditing={setEditing}
-            setEditVal={(v:EditValues)=>setEditVal(v)}
-            onSave={saveActivity}
-          />
-        )}
+        <div className="trip-main-inner">
+          <BudgetSplit trip={trip} plans={plans} acts={acts} />
+          {openDay&&dayMap[openDay]&&(
+            <DayDetail
+              day={openDay} dp={dayMap[openDay]}
+              label={getDayLabel(openDay)}
+              nextStay={dayMap[openDay+1]?.stay}
+              isCurrent={isCurrent(openDay)}
+              editing={editing} editVal={editVal}
+              setEditing={setEditing}
+              setEditVal={(v:EditValues)=>setEditVal(v)}
+              onSave={saveActivity}
+            />
+          )}
+        </div>
       </main>
     </div>
   );
@@ -218,6 +370,8 @@ function DayDetail({ day, dp, label, nextStay, isCurrent, editing, editVal, setE
           )}
         </div>
       )}
+
+      <DayMap activities={acts} dayNumber={day} dayLabel={label} />
 
       <div className="act-timeline">
         {acts.map((act,i)=>{

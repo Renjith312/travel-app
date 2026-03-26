@@ -1,0 +1,142 @@
+/* ── DayMap wrapper ─────────────────────────────────────────── */
+.day-map-wrap {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  margin-bottom: 24px;
+  background: var(--bg2);
+}
+
+/* ── Toggle header ──────────────────────────────────────────── */
+.day-map-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+.day-map-toggle:hover { background: var(--bg3); }
+.day-map-toggle svg:first-child { color: var(--accent); }
+
+.day-map-loading {
+  font-size: 11px;
+  color: var(--text2);
+  font-weight: 400;
+  font-style: italic;
+}
+.day-map-chevron {
+  margin-left: auto;
+  color: var(--text2);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.day-map-chevron.open { transform: rotate(180deg); }
+
+/* ── Map area ───────────────────────────────────────────────── */
+.day-map-container {
+  border-top: 1px solid var(--border);
+}
+
+/* Leaflet overrides — keep z-index inside our card */
+.day-map-container .leaflet-container {
+  background: #1a1f2e;
+  font-family: inherit;
+}
+.day-map-container .leaflet-control-zoom {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+.day-map-container .leaflet-control-zoom a {
+  background: var(--bg2) !important;
+  color: var(--text) !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.day-map-container .leaflet-control-zoom a:hover {
+  background: var(--bg3) !important;
+}
+
+/* ── Numbered pin (rendered via DivIcon HTML) ───────────────── */
+.map-pin {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg, #0f172a);
+  border: 2.5px solid;      /* colour set inline */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+  cursor: default;
+  transition: transform 0.15s;
+}
+.map-pin:hover { transform: scale(1.2); }
+
+.map-pin-num {
+  font-size: 11px;
+  font-weight: 700;
+  color: #f1f5f9;
+  line-height: 1;
+  font-family: inherit;
+}
+
+/* Leaflet tooltip */
+.map-tooltip-text {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.leaflet-tooltip {
+  background: var(--bg, #1e293b) !important;
+  border: 1px solid var(--border, #334155) !important;
+  color: var(--text, #f1f5f9) !important;
+  border-radius: 6px !important;
+  padding: 4px 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  font-size: 12px !important;
+}
+.leaflet-tooltip-top::before {
+  border-top-color: var(--border, #334155) !important;
+}
+
+/* ── Legend strip ───────────────────────────────────────────── */
+.day-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+}
+.day-map-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text2);
+}
+.day-map-legend-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+.day-map-legend-label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

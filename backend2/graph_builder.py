@@ -29,9 +29,11 @@ OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
 ORS_MATRIX_URL = "https://api.openrouteservice.org/v2/matrix/driving-car"
 # Multiple Overpass mirrors — tried in order, first success wins
 OVERPASS_MIRRORS = [
+    "https://overpass.openstreetmap.fr/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 NOMINATIM_URL  = "https://nominatim.openstreetmap.org/search"
@@ -94,7 +96,7 @@ def _elapsed(t0): return f"{time.time()-t0:.1f}s"
 # Mirrors that have already failed this process run — skip them immediately
 _dead_mirrors: set = set()
 
-def _overpass_post(query: str, timeout: int = 45):
+def _overpass_post(query: str, timeout: int = 30):
     """POST an Overpass query, trying each mirror until one succeeds.
 
     Mirror blacklist policy:
@@ -126,8 +128,8 @@ def _overpass_post(query: str, timeout: int = 45):
             return r.json()
 
         except requests.exceptions.Timeout:
-            _warn(f"{mirror} timed out after {timeout}s — trying next mirror")
-            transient_skip.add(mirror)       # timeouts are transient too
+            _warn(f"{mirror} timed out after {timeout}s — marking permanently dead")
+            _dead_mirrors.add(mirror)        # timed out once → will time out again this session
         except requests.exceptions.ConnectionError:
             _warn(f"{mirror} connection error — marking permanently dead")
             _dead_mirrors.add(mirror)
@@ -331,7 +333,7 @@ def _fetch_osm(lat: float, lon: float, destination: str = "") -> list:
     print(f"  → Priority queries: tourism > nature > hidden gems > famous landmarks")
 
     # ── Priority 1: Pure tourism + natural features ───────────────────────────
-    q1 = f"""[out:json][timeout:40];(
+    q1 = f"""[out:json][timeout:25];(
       node["tourism"="attraction"](around:{R},{lat},{lon});
       node["tourism"="museum"](around:{R},{lat},{lon});
       node["tourism"="viewpoint"](around:{R},{lat},{lon});
@@ -354,7 +356,7 @@ def _fetch_osm(lat: float, lon: float, destination: str = "") -> list:
     );out center body;"""
 
     # ── Priority 2: Hidden gems & outdoor spots ───────────────────────────────
-    q2 = f"""[out:json][timeout:40];(
+    q2 = f"""[out:json][timeout:25];(
       node["leisure"="nature_reserve"]["name"](around:{R},{lat},{lon});
       node["leisure"="park"]["name"](around:{R},{lat},{lon});
       node["leisure"="garden"]["name"](around:{R},{lat},{lon});
@@ -375,7 +377,7 @@ def _fetch_osm(lat: float, lon: float, destination: str = "") -> list:
     );out center body;"""
 
     # ── Priority 3: Historic landmarks (forts, monuments — not generic temples) ─
-    q3 = f"""[out:json][timeout:40];(
+    q3 = f"""[out:json][timeout:25];(
       node["historic"="fort"]["name"](around:{R},{lat},{lon});
       node["historic"="castle"]["name"](around:{R},{lat},{lon});
       node["historic"="monument"]["name"](around:{R},{lat},{lon});
@@ -389,7 +391,7 @@ def _fetch_osm(lat: float, lon: float, destination: str = "") -> list:
     );out center body;"""
 
     # ── Priority 4: ONLY famous religious sites (globally known, wiki-tagged) ──
-    q4 = f"""[out:json][timeout:40];(
+    q4 = f"""[out:json][timeout:25];(
       node["tourism"="attraction"]["amenity"="place_of_worship"](around:{R},{lat},{lon});
       node["amenity"="place_of_worship"]["wikidata"](around:{R},{lat},{lon});
       node["amenity"="place_of_worship"]["wikipedia"](around:{R},{lat},{lon});

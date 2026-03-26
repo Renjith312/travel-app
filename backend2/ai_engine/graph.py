@@ -214,11 +214,6 @@ def entry_node(state: TravelState) -> dict:
         pass
     updates["core_info_complete"] = True if _phase_complete else _core_complete(merged)
 
-    # ── Prepare graph if destination already known ────────────
-    if merged.get("destination") and not merged.get("graph_ready"):
-        graph_updates = _prepare_graph(merged)
-        updates.update(graph_updates)
-
     _print_state_snapshot({**merged, **updates}, "AFTER ENTRY")
     return updates
 
@@ -370,11 +365,6 @@ def extract_core_info_node(state: TravelState) -> dict:
         except Exception as e:
             _err(f"DB upsert: {e}")
 
-    # Prepare graph if destination just became known
-    if merged.get("destination") and not merged.get("graph_ready"):
-        graph_updates = _prepare_graph(merged)
-        updates.update(graph_updates)
-
     _print_state_snapshot({**state, **updates}, "AFTER EXTRACT")
     return updates
 
@@ -407,7 +397,8 @@ def ask_next_field_node(state: TravelState) -> dict:
             f"⏳ **Duration:** {state.get('duration_days')} days\n"
             f"👥 **Travelers:** {n}\n"
             f"💰 **Budget:** ₹{state.get('budget')}\n\n"
-            "Shall I generate your itinerary? Just say **yes**! 🗺️"
+            "Say **yes** and I'll fetch the top places in "
+            f"{state.get('destination')} and build your itinerary! 🗺️"
         )
         _ok("All fields collected — showing summary")
 
@@ -437,6 +428,27 @@ def answer_question_node(state: TravelState) -> dict:
 
     print(f"  Response: {response[:120]}")
     return {"final_response": response}
+
+
+# ══════════════════════════════════════════════════════════════
+# NODE 5b — BUILD DESTINATION GRAPH
+# Runs graph_builder (OSM fetch → KNN graph → DB save) after all
+# core info is collected, then continues to generate_itinerary_node.
+# ══════════════════════════════════════════════════════════════
+def build_graph_node(state: TravelState) -> dict:
+    _header("NODE: build_graph_node")
+    destination = state.get("destination", "")
+    print(f"  Destination: {destination!r}")
+
+    graph_updates = _prepare_graph(state)
+
+    if graph_updates.get("has_graph_data"):
+        n = len(graph_updates.get("places", []))
+        _ok(f"Graph ready — {n} places loaded for {destination!r}")
+    else:
+        _warn(f"Graph not available for {destination!r} — will use API fallback during generation")
+
+    return graph_updates
 
 
 # ══════════════════════════════════════════════════════════════
@@ -533,11 +545,13 @@ def generate_itinerary_node(state: TravelState) -> dict:
 
     updates: dict = {}
 
-    # Prepare graph if not ready yet
+    # graph_ready is set by build_graph_node which always runs before this node.
+    # If somehow it's not ready (e.g. direct call path), fall back here.
     if not state.get("graph_ready"):
+        _warn("graph_ready not set — running _prepare_graph as fallback")
         graph_updates = _prepare_graph(state)
         updates.update(graph_updates)
-        state = {**state, **graph_updates}   # local merge for this function only
+        state = {**state, **graph_updates}
 
     destination = state.get("destination")
 
@@ -966,6 +980,9 @@ def route_after_classify(state: TravelState) -> str:
             dest = "ask_next_field_node"
         elif has_itinerary:
             dest = "modify_itinerary_node"
+        elif not state.get("graph_ready"):
+            _ok("Core info complete, graph not yet built — routing to build_graph_node")
+            dest = "build_graph_node"
         else:
             dest = "generate_itinerary_node"
 
@@ -994,6 +1011,7 @@ def create_travel_graph():
         "extract_core_info_node":      extract_core_info_node,
         "ask_next_field_node":         ask_next_field_node,
         "answer_question_node":        answer_question_node,
+        "build_graph_node":            build_graph_node,
         "generate_itinerary_node":     generate_itinerary_node,
         "modify_itinerary_node":       modify_itinerary_node,
         "add_assistant_response_node": add_assistant_response_node,
@@ -1011,15 +1029,20 @@ def create_travel_graph():
         "extract_core_info_node":  "extract_core_info_node",
         "answer_question_node":    "answer_question_node",
         "ask_next_field_node":     "ask_next_field_node",
+        "build_graph_node":        "build_graph_node",
         "generate_itinerary_node": "generate_itinerary_node",
         "modify_itinerary_node":   "modify_itinerary_node",
     })
-    print("  Conditional edges: classify_message_node → [extract|answer|ask|generate|modify]")
+    print("  Conditional edges: classify_message_node → [extract|answer|ask|build_graph|generate|modify]")
 
     wf.add_conditional_edges("extract_core_info_node", route_after_extract, {
         "ask_next_field_node": "ask_next_field_node",
     })
     print("  Conditional edge : extract_core_info_node → ask_next_field_node")
+
+    # build_graph_node feeds directly into generate_itinerary_node (same invocation)
+    wf.add_edge("build_graph_node", "generate_itinerary_node")
+    print("  Edge: build_graph_node → generate_itinerary_node")
 
     terminal_nodes = [
         "ask_next_field_node",

@@ -578,4 +578,9 @@ def graph_state(current_user, trip_id):
 if __name__ == "__main__":
     init_db()
     port = int(os.getenv("PORT", 5000))
-    app.run(debug=os.getenv("FLASK_DEBUG","False")=="True", port=port, host="0.0.0.0")
+    app.run(
+        debug=os.getenv("FLASK_DEBUG", "False") == "True",
+        port=port,
+        host="0.0.0.0",
+        use_reloader=False,   # ← stops double init, prevents engine state corruption
+    )
