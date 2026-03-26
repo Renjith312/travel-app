@@ -137,7 +137,97 @@
 .note-item  { display:flex; gap:10px; font-size:13px; color:var(--text2); line-height:1.5; }
 .note-item span { font-size:18px; flex-shrink:0; }
 
+/* ── Trip info strip ───────────────────────────────────────────────── */
+.trip-info-strip {
+  border-bottom:1px solid var(--border);
+  background:var(--bg2);
+  flex-shrink:0;
+}
+.trip-strip-compact {
+  display:flex; align-items:center; flex-wrap:wrap; gap:10px;
+  padding:8px 16px; font-size:12px;
+}
+.strip-item {
+  display:flex; align-items:center; gap:4px;
+  color:var(--text2);
+}
+.strip-item svg { color:var(--accent); flex-shrink:0; }
+.strip-edit-btn {
+  display:flex; align-items:center; gap:4px; margin-left:auto;
+  color:var(--accent); font-size:12px; padding:4px 10px;
+  border:1px solid var(--accent); border-radius:6px;
+  background:rgba(108,142,255,0.06);
+}
+.strip-edit-btn:hover { background:rgba(108,142,255,0.15); }
+
+/* ── Trip edit form (in the strip) ─────────────────────────────────── */
+.trip-edit-form {
+  padding:14px 16px;
+  background:var(--bg2);
+}
+.trip-edit-header {
+  display:flex; justify-content:space-between; align-items:center;
+  font-size:13px; font-weight:600; margin-bottom:12px;
+}
+.icon-btn { padding:4px; border-radius:6px; }
+.trip-edit-footer {
+  display:flex; gap:8px; margin-top:12px;
+}
+
+/* ── Trip setup card (inline form for new trips) ────────────────────── */
+.setup-msg { align-items:flex-start !important; max-width:100% !important; }
+
+.setup-card {
+  background:var(--bg2); border:1px solid var(--border);
+  border-radius:16px; padding:20px; flex:1; max-width:520px;
+}
+.setup-card-header { margin-bottom:18px; }
+.setup-card-title  { font-size:16px; font-weight:700; display:block; margin-bottom:4px; }
+.setup-card-sub    { font-size:13px; color:var(--text2); }
+
+.setup-form {
+  display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;
+}
+.setup-field { display:flex; flex-direction:column; gap:5px; }
+.setup-field-full { grid-column:1 / -1; }
+.setup-field label { font-size:12px; font-weight:600; color:var(--text2); }
+.setup-field input, .setup-field select {
+  padding:8px 12px; border-radius:8px; font-size:13px;
+  background:var(--bg); border:1px solid var(--border); color:var(--text);
+}
+.setup-field input:focus, .setup-field select:focus { border-color:var(--accent); outline:none; }
+.setup-field select { cursor:pointer; }
+.req  { color:#f87171; }
+.setup-opt { font-weight:400; color:var(--text2); font-size:11px; }
+.field-err { font-size:11px; color:#f87171; }
+
+.setup-submit-btn {
+  display:flex; align-items:center; justify-content:center; gap:7px;
+  width:100%; padding:11px; border-radius:10px;
+  background:var(--accent2); color:#fff; font-weight:600; font-size:14px;
+}
+.setup-submit-btn:hover:not(:disabled) { background:var(--accent); }
+.setup-submit-btn:disabled { opacity:0.55; cursor:not-allowed; }
+
+/* ── Generate itinerary bar ─────────────────────────────────────────── */
+.generate-bar {
+  display:flex; align-items:center; gap:12px;
+  padding:12px 20px; background:rgba(108,142,255,0.07);
+  border-top:1px solid rgba(108,142,255,0.2);
+  border-bottom:1px solid rgba(108,142,255,0.2);
+  flex-shrink:0;
+}
+.generate-btn {
+  display:flex; align-items:center; gap:7px;
+  background:var(--accent2); color:#fff;
+  padding:9px 20px; border-radius:10px; font-size:14px; font-weight:600;
+  white-space:nowrap;
+}
+.generate-btn:hover { background:var(--accent); }
+.generate-hint { font-size:12px; color:var(--accent); }
+
 @media(max-width:900px) {
   .chat-body { flex-direction:column; }
   .itin-panel { width:100%; height:400px; border-top:1px solid var(--border); border-right:none; }
+  .setup-form { grid-template-columns:1fr; }
 }
