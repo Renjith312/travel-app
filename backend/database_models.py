@@ -1,7 +1,6 @@
 """
 database_models.py
-SQLAlchemy ORM models matching the Supabase/PostgreSQL schema exactly.
-Column names use snake_case in DB, camelCase as Python attributes.
+SQLAlchemy ORM models for local PostgreSQL.
 """
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float, DateTime,
@@ -191,28 +190,28 @@ class Region(Base):
 
 class Place(Base):
     __tablename__ = 'places'
-    id                  = Column(String, primary_key=True)
-    regionId            = Column('region_id', String, ForeignKey('regions.id', ondelete='CASCADE'), nullable=False)
-    name                = Column(String, nullable=False)
-    category            = Column(SQLEnum(PlaceCategory), nullable=False)
-    subcategory         = Column(String)
-    latitude            = Column(Float, nullable=False)
-    longitude           = Column(Float, nullable=False)
-    address             = Column(Text)
-    description         = Column(Text)
-    rating              = Column(Float)
-    popularityScore     = Column('popularity_score', Float)
-    typicalVisitDuration= Column('typical_visit_duration', Integer)
-    openingHours        = Column('opening_hours', JSON)
-    bestTimeToVisit     = Column('best_time_to_visit', String)
-    entryFee            = Column('entry_fee', Float)
-    currency            = Column(String, default='INR')
-    osmId               = Column('osm_id', String)
-    googlePlaceId       = Column('google_place_id', String)
-    images              = Column(ARRAY(String))
-    tags                = Column(ARRAY(String))
-    createdAt           = Column('created_at', DateTime, default=utc_now)
-    updatedAt           = Column('updated_at', DateTime, default=utc_now, onupdate=utc_now)
+    id                   = Column(String, primary_key=True)
+    regionId             = Column('region_id', String, ForeignKey('regions.id', ondelete='CASCADE'), nullable=False)
+    name                 = Column(String, nullable=False)
+    category             = Column(SQLEnum(PlaceCategory), nullable=False)
+    subcategory          = Column(String)
+    latitude             = Column(Float, nullable=False)
+    longitude            = Column(Float, nullable=False)
+    address              = Column(Text)
+    description          = Column(Text)
+    rating               = Column(Float)
+    popularityScore      = Column('popularity_score', Float)
+    typicalVisitDuration = Column('typical_visit_duration', Integer)
+    openingHours         = Column('opening_hours', JSON)
+    bestTimeToVisit      = Column('best_time_to_visit', String)
+    entryFee             = Column('entry_fee', Float)
+    currency             = Column(String, default='INR')
+    osmId                = Column('osm_id', String)
+    googlePlaceId        = Column('google_place_id', String)
+    images               = Column(ARRAY(String))
+    tags                 = Column(ARRAY(String))
+    createdAt            = Column('created_at', DateTime, default=utc_now)
+    updatedAt            = Column('updated_at', DateTime, default=utc_now, onupdate=utc_now)
     region        = relationship('Region', back_populates='places')
     outgoingEdges = relationship('PlaceEdge', foreign_keys='PlaceEdge.fromPlaceId', back_populates='fromPlace', cascade='all, delete-orphan')
     incomingEdges = relationship('PlaceEdge', foreign_keys='PlaceEdge.toPlaceId',   back_populates='toPlace',   cascade='all, delete-orphan')
@@ -220,19 +219,19 @@ class Place(Base):
 
 class PlaceEdge(Base):
     __tablename__ = 'place_edges'
-    id                      = Column(String, primary_key=True)
-    graphId                 = Column('graph_id',    String, ForeignKey('place_graphs.id', ondelete='CASCADE'), nullable=False)
-    fromPlaceId             = Column('from_place_id', String, ForeignKey('places.id',      ondelete='CASCADE'), nullable=False)
-    toPlaceId               = Column('to_place_id',   String, ForeignKey('places.id',      ondelete='CASCADE'), nullable=False)
-    roadDistanceKm          = Column('road_distance_km', Float, nullable=False)
-    durationMin             = Column('duration_min',     Float, nullable=False)
-    straightLineDistanceKm  = Column('straight_line_distance_km', Float)
-    transportMode           = Column('transport_mode', String, default='driving')
-    travelCost              = Column('travel_cost', Float)
-    edgeType                = Column('edge_type',   String, default='road')
-    routePolyline           = Column('route_polyline', Text)
-    createdAt               = Column('created_at', DateTime, default=utc_now)
-    updatedAt               = Column('updated_at', DateTime, default=utc_now, onupdate=utc_now)
+    id                     = Column(String, primary_key=True)
+    graphId                = Column('graph_id',      String, ForeignKey('place_graphs.id', ondelete='CASCADE'), nullable=False)
+    fromPlaceId            = Column('from_place_id', String, ForeignKey('places.id',       ondelete='CASCADE'), nullable=False)
+    toPlaceId              = Column('to_place_id',   String, ForeignKey('places.id',       ondelete='CASCADE'), nullable=False)
+    roadDistanceKm         = Column('road_distance_km', Float, nullable=False)
+    durationMin            = Column('duration_min',     Float, nullable=False)
+    straightLineDistanceKm = Column('straight_line_distance_km', Float)
+    transportMode          = Column('transport_mode', String, default='driving')
+    travelCost             = Column('travel_cost', Float)
+    edgeType               = Column('edge_type',   String, default='road')
+    routePolyline          = Column('route_polyline', Text)
+    createdAt              = Column('created_at', DateTime, default=utc_now)
+    updatedAt              = Column('updated_at', DateTime, default=utc_now, onupdate=utc_now)
     graph     = relationship('PlaceGraph', back_populates='edges')
     fromPlace = relationship('Place', foreign_keys=[fromPlaceId], back_populates='outgoingEdges')
     toPlace   = relationship('Place', foreign_keys=[toPlaceId],   back_populates='incomingEdges')
@@ -261,46 +260,51 @@ class PlaceGraph(Base):
     edges  = relationship('PlaceEdge', back_populates='graph', cascade='all, delete-orphan')
 
 
-# Indexes
-Index('idx_region_location',  Region.country,      Region.state, Region.name)
-Index('idx_place_location',   Place.latitude,      Place.longitude)
-Index('idx_place_category',   Place.category)
-Index('idx_place_region',     Place.regionId)
-Index('idx_edge_graph',       PlaceEdge.graphId)
-Index('idx_edge_from',        PlaceEdge.fromPlaceId)
-Index('idx_edge_to',          PlaceEdge.toPlaceId)
-Index('idx_graph_region',     PlaceGraph.regionId)
-Index('idx_graph_status',     PlaceGraph.status)
+# ── Indexes ────────────────────────────────────────────────────────────────────
+Index('idx_region_location', Region.country,      Region.state, Region.name)
+Index('idx_place_location',  Place.latitude,      Place.longitude)
+Index('idx_place_category',  Place.category)
+Index('idx_place_region',    Place.regionId)
+Index('idx_edge_graph',      PlaceEdge.graphId)
+Index('idx_edge_from',       PlaceEdge.fromPlaceId)
+Index('idx_edge_to',         PlaceEdge.toPlaceId)
+Index('idx_graph_region',    PlaceGraph.regionId)
+Index('idx_graph_status',    PlaceGraph.status)
 
 
 # ── DB setup ───────────────────────────────────────────────────────────────────
 def _build_db_url() -> str:
     load_dotenv()
+
+    # If DATABASE_URL is explicitly set, use it directly
     url = os.getenv('DATABASE_URL')
-    if not url:
-        raise ValueError("DATABASE_URL not set in .env")
-    # Strip any Supabase-specific params that psycopg2 doesn't understand
-    import re as _re
-    url = _re.sub(r'[?&]pgbouncer=[^&]*', '', url)
-    url = _re.sub(r'[?&]prepared_statements=[^&]*', '', url)
-    return url
+    if url:
+        return url
+
+    # Otherwise build from individual vars (typical for local Postgres)
+    host     = os.getenv('DB_HOST',     'localhost')
+    port     = os.getenv('DB_PORT',     '5432')
+    name     = os.getenv('DB_NAME',     'travel_copilot')
+    user     = os.getenv('DB_USER',     'postgres')
+    password = os.getenv('DB_PASSWORD', '')
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
 _engine = None
 
 def _create_engine_instance():
-    from sqlalchemy.pool import NullPool
-    # Use NullPool with Supabase — don't maintain a local pool at all.
-    # PgBouncer (Supabase side) IS the pool. Local pooling fights with it
-    # and causes "SSL connection closed unexpectedly" on idle connections.
-    # NullPool = open a fresh connection per request, close immediately after.
-    # This is slightly slower per request but 100% reliable with Supabase.
+    from sqlalchemy.pool import QueuePool
     return create_engine(
         _build_db_url(),
-        poolclass=NullPool,
+        # Local Postgres: use a real connection pool (no PgBouncer fighting)
+        poolclass=QueuePool,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,       # test connection before use
+        pool_recycle=1800,        # recycle connections every 30 min
         connect_args={
             "connect_timeout": 10,
-            "sslmode":         "require",
+            "options":         "-c statement_timeout=30000",
         },
     )
 
@@ -311,7 +315,6 @@ def get_engine():
     return _engine
 
 def reset_engine():
-    """Dispose current engine and create a fresh one."""
     global _engine
     if _engine is not None:
         try:
@@ -322,9 +325,13 @@ def reset_engine():
     return _engine
 
 def init_database():
-    engine = get_engine()
-    Base.metadata.create_all(engine)
-    print("✅ Database tables ready")
+    try:
+        engine = get_engine()
+        Base.metadata.create_all(engine)
+        print("✅ Database tables ready")
+    except Exception as e:
+        print(f"⚠️  init_database error: {e}")
+        raise   # local Postgres errors should be fatal — fix them before starting
 
 def get_session_maker():
     from sqlalchemy.orm import sessionmaker as _sm
