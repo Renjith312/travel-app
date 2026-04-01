@@ -4,9 +4,9 @@ import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import { Trip } from '../types';
 import { Plus, MapPin, Calendar, Users, Wallet, Compass, LogOut,
-         ChevronRight, Clock, CheckCircle, Trash2, AlertCircle } from 'lucide-react';
+         ChevronRight, Clock, CheckCircle, Trash2, AlertCircle, Ticket } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
-import './HomePage.css';
+import "./HomePage.css";
 
 interface StatusMeta { label: string; cls: string; icon: React.ReactNode; }
 const STATUS_META: Record<string, StatusMeta> = {
@@ -73,6 +73,9 @@ export default function HomePage() {
         <button className="new-trip-btn" onClick={newTrip} disabled={creating}>
           <Plus size={18}/>{creating?'Creating…':'New Trip'}
         </button>
+        <button className="book-travel-btn" onClick={()=>navigate('/booking')}>
+          <Ticket size={18}/>Book Travel
+        </button>
         <nav className="sidebar-nav">
           <div className="nav-section">All Trips</div>
           {trips.slice(0,8).map(t=>(
@@ -103,6 +106,17 @@ export default function HomePage() {
             <Plus size={16}/>{creating?'Creating…':'Plan a new trip'}
           </button>
         </header>
+
+        <div className="booking-banner" onClick={()=>navigate('/booking')}>
+          <div className="booking-banner-left">
+            <Ticket size={22} color="#a29bfe"/>
+            <div>
+              <div className="booking-banner-title">Book Your Travel</div>
+              <div className="booking-banner-sub">Buses · Trains · Hotels — all in one place</div>
+            </div>
+          </div>
+          <ChevronRight size={18} color="#a29bfe"/>
+        </div>
 
         {loading ? (
           <div className="home-loading"><div className="spinner-lg"/><p>Loading your trips…</p></div>

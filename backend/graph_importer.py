@@ -355,7 +355,7 @@ if __name__ == "__main__":
         importer = GraphImporter(db)
         graph = importer.import_graph_from_file(
             graphml_path="tourist_place_graph.graphml",
-            region_name="wayanad",
+            region_name="Idukki",
             state="kerala",
             country="India",
         )

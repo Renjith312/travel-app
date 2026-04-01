@@ -36,7 +36,7 @@ from ai_engine.tools import fetch_places, fetch_stays
 from database_models import (
     Trip, Itinerary, ItineraryActivity,
     Place, Region, PlaceGraph, PlaceEdge,
-    TripStatus, ActivityType, ActivityStatus,
+    TripStatus, ActivityType, ActivityStatus, GraphStatus,
     get_session_maker,
 )
 
@@ -247,15 +247,29 @@ CONFIRMATIONS = {
     "yes please", "sounds good", "sure thing",
 }
 
+MODIFICATION_KEYWORDS = [
+    "add ", "remove ", "delete ", "change ", "modify ", "replace ", "update ", "edit ",
+    "include ", "swap ", "one more", "another event", "extra day", "extra activity",
+    "regenerate", "redo", "start over", "different plan", "make it", "less ", "more ",
+]
+
 def classify_message_node(state: TravelState) -> dict:
     _header("NODE: classify_message_node")
     msg = state["user_message"].strip()
     print(f"  Input: {msg!r}")
 
-    # Fast-path for obvious confirmations
+    # Fast-path 1: obvious confirmations
     if msg.lower() in CONFIRMATIONS:
         intent = "itinerary_request"
         _ok(f"Fast-path confirmation → {intent}")
+        return {"detected_intent": intent}
+
+    # Fast-path 2: modification keywords when itinerary already exists
+    # (local LLMs often fail to return clean JSON for this classification)
+    msg_lower = msg.lower()
+    if state.get("itinerary") and any(kw in msg_lower for kw in MODIFICATION_KEYWORDS):
+        intent = "itinerary_request"
+        _ok(f"Fast-path modification keyword → {intent}")
         return {"detected_intent": intent}
 
     try:
@@ -387,7 +401,16 @@ def ask_next_field_node(state: TravelState) -> dict:
         _ok(f"Next question → asking for: {field}")
         response = question
     else:
-        n = state.get("num_travelers", 1) or 1
+        n = int(state.get("num_travelers", 1) or 1)
+        try:
+            total_budget = int(float(str(state.get("budget") or "0").replace(",", "")))
+            per_person   = total_budget // n if n > 1 else 0
+            budget_line  = (
+                f"₹{total_budget:,} total (₹{per_person:,}/person for {n} travelers)"
+                if n > 1 else f"₹{total_budget:,}"
+            )
+        except Exception:
+            budget_line = f"₹{state.get('budget')}"
         response = (
             f"Great! Here's your trip summary:\n\n"
             f"🏠 **From:** {state.get('origin')}\n"
@@ -396,7 +419,7 @@ def ask_next_field_node(state: TravelState) -> dict:
             f"🚗 **Mode:** {state.get('travel_mode')}\n"
             f"⏳ **Duration:** {state.get('duration_days')} days\n"
             f"👥 **Travelers:** {n}\n"
-            f"💰 **Budget:** ₹{state.get('budget')}\n\n"
+            f"💰 **Budget:** {budget_line}\n\n"
             "Say **yes** and I'll fetch the top places in "
             f"{state.get('destination')} and build your itinerary! 🗺️"
         )
@@ -454,7 +477,7 @@ def build_graph_node(state: TravelState) -> dict:
 # ══════════════════════════════════════════════════════════════
 # NODE 6a — GENERATE ITINERARY  (single prompt, all days)
 # ══════════════════════════════════════════════════════════════
-def _build_itinerary_prompt(state, place_names: list, stays: list) -> str:
+def _build_itinerary_prompt(state, place_names: list, stays: list, places_with_coords: list = None) -> str:
     origin      = state.get("origin", "your city")
     destination = state.get("destination")
     n           = int(state.get("num_travelers") or 1)
@@ -474,7 +497,17 @@ def _build_itinerary_prompt(state, place_names: list, stays: list) -> str:
 
     first_hotel = stays[0]["name"] if stays else f"{destination} Hotel"
     hotel_names = ", ".join(s["name"] for s in stays[:4]) if stays else first_hotel
-    places_list = ", ".join(place_names[:20]) if place_names else f"popular spots in {destination}"
+
+    # Build places list — include coordinates when available so LLM uses accurate GPS
+    if places_with_coords:
+        places_list = "; ".join(
+            f"{p['name']} (lat:{p['latitude']:.4f},lon:{p['longitude']:.4f})"
+            for p in places_with_coords[:20]
+        )
+    elif place_names:
+        places_list = ", ".join(place_names[:20])
+    else:
+        places_list = f"popular spots in {destination}"
 
     # Explicit per-day blueprint — LLM must honour wakes_at / sleeps_at
     blueprint = []
@@ -532,6 +565,7 @@ def _build_itinerary_prompt(state, place_names: list, stays: list) -> str:
         f"- Return day       : 3 activities — checkout → travel → arrive home.\n"
         f"- stay_name        : hotel for that night; null on return day.\n"
         f"- estimatedCost    : plain INR integer per person (not a string).\n"
+        f"- location         : use the exact lat/lon provided in the Places list above; for unlisted places estimate near {destination}.\n"
         f"- All coordinates  : realistic lat/lon near {destination}.\n"
         f"- Output ALL {total_days} days. Do NOT skip any day.\n\n"
         f"Output ONLY valid JSON matching this exact structure:\n{schema}"
@@ -560,17 +594,19 @@ def generate_itinerary_node(state: TravelState) -> dict:
     updates["stays"] = stays
     _ok(f"{len(stays)} stays fetched")
 
-    # Resolve place names
+    # Resolve places — keep full dicts so we can pass coordinates to the prompt
     graph_data = state.get("graph_data") or updates.get("graph_data")
     if state.get("has_graph_data") and graph_data:
-        place_names = [p["name"] for p in list(graph_data["places"].values())[:20]]
-        _ok(f"{len(place_names)} places from graph DB")
+        all_places = list(graph_data["places"].values())[:20]
+        _ok(f"{len(all_places)} places from graph DB")
     else:
-        place_names = [p["name"] for p in state.get("places", [])[:20]]
-        _ok(f"{len(place_names)} places from API fallback")
+        all_places = state.get("places", [])[:20]
+        _ok(f"{len(all_places)} places from API fallback")
+
+    place_names = [p["name"] for p in all_places]
 
     try:
-        prompt = _build_itinerary_prompt({**state, **updates}, place_names, stays)
+        prompt = _build_itinerary_prompt({**state, **updates}, place_names, stays, places_with_coords=all_places)
         system = (
             "You are a JSON-only travel itinerary generator. "
             "Output ONLY valid JSON. No markdown, no explanation. "
@@ -762,7 +798,7 @@ def fetch_graph_data_from_db(destination: str):
                 _warn(f"Region not found in DB: {destination!r}")
                 return None
             graph = s.query(PlaceGraph).filter_by(
-                regionId=region.id, status="ACTIVE"
+                regionId=region.id, status=GraphStatus.ACTIVE
             ).order_by(PlaceGraph.version.desc()).first()
             if not graph:
                 _warn(f"No active PlaceGraph for: {region.name}")
@@ -891,6 +927,28 @@ def _upsert_trip(state: dict) -> str:
 
 
 def _save_itinerary(state: dict) -> str:
+    # Build a name→coords lookup from known places so we can fix 0,0 coordinates
+    _place_coords: dict = {}
+    graph_data = state.get("graph_data")
+    if graph_data:
+        for p in graph_data.get("places", {}).values():
+            if p.get("latitude") and p.get("longitude"):
+                _place_coords[p["name"].lower()] = (p["latitude"], p["longitude"])
+    for p in state.get("places", []):
+        if p.get("latitude") and p.get("longitude"):
+            _place_coords[p["name"].lower()] = (p["latitude"], p["longitude"])
+
+    def _resolve_coords(title: str, loc: dict) -> tuple:
+        """Return (lat, lon) — fall back to known place coords if LLM gave 0,0."""
+        lat = loc.get("lat") if isinstance(loc, dict) else None
+        lon = loc.get("lon") if isinstance(loc, dict) else None
+        if (not lat and not lon) or (lat == 0 and lon == 0):
+            key = title.lower()
+            for pname, coords in _place_coords.items():
+                if pname in key or key in pname:
+                    return coords
+        return lat, lon
+
     S = get_session_maker()
     with S() as s:
         try:
@@ -929,16 +987,17 @@ def _save_itinerary(state: dict) -> str:
                         cost = float(str(act.get("estimatedCost", 0) or 0).replace(",", ""))
                     except Exception:
                         pass
+                    act_lat, act_lon = _resolve_coords(title, loc)
                     s.add(ItineraryActivity(
                         id=str(uuid.uuid4()), itineraryId=itin.id,
                         dayNumber=dp["day_number"],
                         date=(datetime.fromisoformat(dp["date"]) if dp.get("date") else None),
                         title=title, description=act.get("details", ""),
                         type=atype, status=ActivityStatus.SUGGESTED,
-                        location=(f"{loc.get('lat',0)},{loc.get('lon',0)}"
-                                  if isinstance(loc, dict) else str(loc or title)),
-                        latitude=(loc.get("lat")  if isinstance(loc, dict) else None),
-                        longitude=(loc.get("lon") if isinstance(loc, dict) else None),
+                        location=(f"{act_lat},{act_lon}"
+                                  if act_lat and act_lon else str(loc or title)),
+                        latitude=act_lat,
+                        longitude=act_lon,
                         startTime=act.get("start_time"), endTime=act.get("end_time"),
                         orderIndex=idx, estimatedCost=cost,
                         createdAt=datetime.utcnow(), updatedAt=datetime.utcnow(),

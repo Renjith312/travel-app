@@ -446,6 +446,7 @@ def _llm_places_fallback(destination: str, interests: List[str],
     """
     try:
         import json as _json
+        raw_text = ""
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         interest_hint = f" Focus on: {', '.join(interests)}." if interests else ""
@@ -497,8 +498,28 @@ def _llm_places_fallback(destination: str, interests: List[str],
                 except Exception as e:
                     print(f"[TOOLS][llm_fallback] OpenRouter error: {e}")
 
+        if not data:
+            # Try local Ollama as last resort (no API key needed)
+            ollama_url  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            ollama_model = os.getenv("OLLAMA_MODEL", "mistral")
+            try:
+                r = requests.post(
+                    f"{ollama_url}/api/chat",
+                    json={"model": ollama_model,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "stream": False,
+                          "options": {"temperature": 0.2, "num_predict": 2048}},
+                    timeout=60,
+                )
+                if r.status_code == 200:
+                    raw_text = r.json().get("message", {}).get("content", "")
+                    data = _robust_json_parse(raw_text)
+                    print(f"[TOOLS][llm_fallback] Ollama responded: {len(raw_text)} chars")
+            except Exception as e:
+                print(f"[TOOLS][llm_fallback] Ollama error: {e}")
+
         if not data or not isinstance(data, list):
-            print(f"[TOOLS][llm_fallback] No valid data from LLMs. Raw preview: {(raw_text or '')[:200]!r}")
+            print(f"[TOOLS][llm_fallback] No valid data from any LLM")
             return []
 
         places = []

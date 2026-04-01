@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import HomePage  from './pages/HomePage';
 import ChatPage  from './pages/ChatPage';
 import TripPage  from './pages/TripPage';
+import BookingPage from './pages/booking';
 
 function Guard({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/"             element={<Guard><HomePage /></Guard>} />
           <Route path="/chat/:tripId" element={<Guard><ChatPage /></Guard>} />
           <Route path="/trip/:tripId" element={<Guard><TripPage /></Guard>} />
+          <Route path="/booking"      element={<Guard><BookingPage /></Guard>} />
           <Route path="*"             element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PLACE_NAME = "Wayanad, India"
+PLACE_NAME = "Idukki, India"
 K = 4                       # nearest neighbors
 MAX_TRAVEL_TIME_MIN = 60
 CHUNK_SIZE = 50             # ORS matrix limit per request
@@ -162,16 +162,25 @@ for c_i, chunk in enumerate(chunks):
 
     time.sleep(RATE_LIMIT_SLEEP)
 
+skipped_same = 0
 for u, v in same_chunk_edges:
     c_i = chunk_assignments[u]
     m = chunk_matrices.get(c_i)
     if m is None:
+        skipped_same += 1
         continue
     lu = m["local_map"][u]
     lv = m["local_map"][v]
-    dist_km  = m["dist"][lu][lv] / 1000
-    dur_min  = m["time"][lu][lv] / 60
-    edge_data[(u, v)] = (dist_km, dur_min)
+    raw_dist = m["dist"][lu][lv]
+    raw_time = m["time"][lu][lv]
+    if raw_dist is None or raw_time is None:
+        # ORS couldn't compute a road route between these two points
+        skipped_same += 1
+        continue
+    edge_data[(u, v)] = (raw_dist / 1000, raw_time / 60)
+
+if skipped_same:
+    print(f"  Skipped {skipped_same} same-chunk edges (no road route found)")
 
 # --- Query cross-chunk edges in batches of PAIR_BATCH ---
 def batch_cross_chunk(pairs):
@@ -191,12 +200,20 @@ def batch_cross_chunk(pairs):
 
         try:
             result = ors_matrix_chunk(batch_coords)
+            skipped = 0
             for u, v in batch:
                 lu, lv = local[u], local[v]
-                dist_km = result["distances"][lu][lv] / 1000
-                dur_min = result["durations"][lu][lv] / 60
-                edge_data[(u, v)] = (dist_km, dur_min)
-            print(f"  Cross-chunk batch {i // PAIR_BATCH} ({len(batch)} pairs) → OK")
+                raw_dist = result["distances"][lu][lv]
+                raw_time = result["durations"][lu][lv]
+                if raw_dist is None or raw_time is None:
+                    # ORS couldn't compute a road route between these two points
+                    skipped += 1
+                    continue
+                edge_data[(u, v)] = (raw_dist / 1000, raw_time / 60)
+            msg = f"  Cross-chunk batch {i // PAIR_BATCH} ({len(batch)} pairs) → OK"
+            if skipped:
+                msg += f", skipped {skipped} (no route)"
+            print(msg)
         except requests.exceptions.HTTPError as e:
             print(f"  Cross-chunk batch {i // PAIR_BATCH} failed: {e}")
 

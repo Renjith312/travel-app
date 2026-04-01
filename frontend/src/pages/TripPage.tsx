@@ -80,19 +80,21 @@ interface BudgetSplitProps {
 }
 function BudgetSplit({ trip, plans, acts }: BudgetSplitProps) {
   const [open, setOpen] = useState(true);
+  const numTravelers = trip.numberOfTravelers || 1;
 
   // Aggregate costs — prefer fullItinerary daily_plans when available
+  // estimatedCost from LLM is per person — multiply by travelers for actual total
   const items: { type: string; cost: number; day: number }[] = [];
   if (plans.length > 0) {
     plans.forEach(dp => {
       (dp.activities || []).forEach((a: RawActivity) => {
-        const cost = Number(a.estimatedCost) || 0;
+        const cost = (Number(a.estimatedCost) || 0) * numTravelers;
         if (cost > 0) items.push({ type: (a.type || 'OTHER').toUpperCase(), cost, day: dp.day_number });
       });
     });
   } else {
     acts.forEach(a => {
-      const cost = a.estimatedCost || 0;
+      const cost = (a.estimatedCost || 0) * numTravelers;
       if (cost > 0) items.push({ type: (a.type || 'OTHER').toUpperCase(), cost, day: a.dayNumber });
     });
   }
@@ -122,6 +124,7 @@ function BudgetSplit({ trip, plans, acts }: BudgetSplitProps) {
         <span>Budget Overview</span>
         <span className={`bs-toggle-total${overBudget ? ' over' : ''}`}>
           ₹{totalEst.toLocaleString()}
+          {numTravelers > 1 && <span className="bs-toggle-of"> (₹{Math.round(totalEst / numTravelers).toLocaleString()}/person)</span>}
           {totalBudget > 0 && <span className="bs-toggle-of"> / ₹{totalBudget.toLocaleString()}</span>}
         </span>
         <ChevronDown size={13} className={`bs-chevron${open ? ' open' : ''}`} />

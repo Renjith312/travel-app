@@ -32,12 +32,12 @@ function parseLocation(loc: RawActivity['location']): [number, number] | null {
   if (!loc) return null;
   if (typeof loc === 'object' && 'lat' in loc) {
     const { lat, lon } = loc as { lat: number; lon: number };
-    if (lat && lon) return [lat, lon];
+    if (lat != null && lon != null && !(lat === 0 && lon === 0)) return [lat, lon];
   }
   if (typeof loc === 'string') {
     const parts = loc.split(',').map(s => parseFloat(s.trim()));
-    if (parts.length === 2 && !parts.some(isNaN) && parts[0] !== 0) {
-      return [parts[0], parts[1]]; // "lat,lon"
+    if (parts.length === 2 && !parts.some(isNaN) && !(parts[0] === 0 && parts[1] === 0)) {
+      return [parts[0], parts[1]];
     }
   }
   return null;
@@ -48,7 +48,7 @@ function extractPoints(activities: (Activity | RawActivity)[]): MapPoint[] {
   for (const act of activities) {
     if ('id' in act) {
       const a = act as Activity;
-      if (a.latitude && a.longitude) {
+      if (a.latitude != null && a.longitude != null && !(a.latitude === 0 && a.longitude === 0)) {
         pts.push({ latlng: [a.latitude, a.longitude], label: a.title, type: a.type || 'OTHER' });
       }
     } else {
