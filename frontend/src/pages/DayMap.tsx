@@ -146,14 +146,14 @@ export default function DayMap({ activities, dayNumber, dayLabel }: DayMapProps)
       .finally(() => setLoading(false));
   }, [dayNumber]);
 
-  if (points.length < 2) return null;
+  if (points.length < 1) return null;
 
   return (
     <div className="day-map-wrap">
       {/* Toggle header */}
       <button className="day-map-toggle" onClick={() => setOpen(o => !o)}>
         <MapPin size={13} />
-        <span>Route Map · {points.length} stops</span>
+        <span>{points.length > 1 ? `Route Map · ${points.length} stops` : `Map · ${points.length} stop`}</span>
         {loading && <span className="day-map-loading">fetching route…</span>}
         <ChevronDown size={13} className={`day-map-chevron${open ? ' open' : ''}`} />
       </button>
@@ -177,7 +177,7 @@ export default function DayMap({ activities, dayNumber, dayLabel }: DayMapProps)
             <FitBounds points={points} />
 
             {/* Road route from OSRM */}
-            {routePath && (
+            {routePath && points.length > 1 && (
               <>
                 {/* Casing (dark outline) */}
                 <Polyline
@@ -193,7 +193,7 @@ export default function DayMap({ activities, dayNumber, dayLabel }: DayMapProps)
             )}
 
             {/* Dashed straight-line while loading or on API failure */}
-            {!routePath && (
+            {!routePath && points.length > 1 && (
               <Polyline
                 positions={straightLine}
                 pathOptions={{ color: '#6c8eff', weight: 2, opacity: 0.7, dashArray: '8 6' }}
